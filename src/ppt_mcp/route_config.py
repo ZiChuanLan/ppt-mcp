@@ -56,47 +56,47 @@ class ResolvedRoute:
 ROUTES: tuple[RouteDefinition, ...] = (
     RouteDefinition(
         route="local_basic",
-        title="Local Basic",
-        summary="Local PDF parsing without a remote OCR provider.",
+        title="基础本地解析",
+        summary="本地解析 PDF，不调用远程 OCR 模型。",
         env_hints=(),
-        aliases=("basic", "local", "local_basic"),
-        notes=("Best for text PDFs or quick smoke tests.",),
+        aliases=("基础本地解析", "basic", "local", "local_basic"),
+        notes=("适合文本型 PDF 或快速冒烟测试。",),
     ),
     RouteDefinition(
         route="mineru",
-        title="MinerU",
-        summary="MinerU cloud parsing using a server-side API token from env.",
+        title="MinerU 云解析",
+        summary="调用 MinerU 云端解析，适合需要完整文档理解的场景。",
         env_hints=("MINERU_API_TOKEN",),
-        aliases=("mineru_cloud",),
+        aliases=("MinerU 云解析", "云端文档解析", "mineru_cloud"),
     ),
     RouteDefinition(
         route="baidu_doc",
-        title="Baidu Doc",
-        summary="Baidu document parsing with PaddleOCR-VL mode.",
+        title="百度文档解析",
+        summary="调用百度文档解析能力，适合百度 OCR 生态。",
         env_hints=("BAIDU_API_KEY", "BAIDU_SECRET_KEY"),
-        aliases=("baidu", "baidu_doc"),
+        aliases=("百度文档解析", "baidu", "baidu_doc"),
     ),
     RouteDefinition(
         route="layout_block",
-        title="Layout Block",
-        summary="Local layout detection plus AI OCR per block. Recommended for Qwen-VL-class models.",
+        title="本地切块识别",
+        summary="先做本地版面切块，再逐块调用 AI OCR。适合 Qwen-VL 类模型。",
         env_hints=("SILICONFLOW_API_KEY or PPT_LAYOUT_BLOCK_API_KEY",),
-        aliases=("local.aiocr.layout_block",),
+        aliases=("本地切块识别", "local.aiocr.layout_block"),
     ),
     RouteDefinition(
         route="direct",
-        title="Direct",
-        summary="Whole-page prompt-driven OCR. Recommended for DeepSeek-OCR-class models.",
+        title="模型直出框和文字",
+        summary="整页直接交给模型输出文字与框。适合 DeepSeek-OCR 类模型。",
         env_hints=("SILICONFLOW_API_KEY or PPT_DIRECT_API_KEY",),
-        aliases=("local.aiocr.direct",),
+        aliases=("模型直出框和文字", "local.aiocr.direct"),
     ),
     RouteDefinition(
         route="doc_parser",
-        title="Doc Parser",
-        summary="PaddleOCR-VL document parsing through the dedicated doc_parser chain.",
+        title="内置文档解析",
+        summary="走内置文档解析链路，适合 PaddleOCR-VL 类模型。",
         env_hints=("SILICONFLOW_API_KEY or PPT_DOC_PARSER_API_KEY",),
-        aliases=("local.aiocr.doc_parser",),
-        notes=("Requires a PaddleOCR-VL model.",),
+        aliases=("内置文档解析", "local.aiocr.doc_parser"),
+        notes=("需要支持 PaddleOCR-VL 的模型。",),
     ),
 )
 
@@ -150,6 +150,8 @@ def list_routes() -> list[dict[str, Any]]:
         items.append(
             {
                 "route": item.route,
+                "display_name": item.title,
+                "recommended_input": item.title,
                 "title": item.title,
                 "summary": item.summary,
                 "aliases": list(item.aliases),
@@ -171,7 +173,10 @@ def resolve_route(route: str) -> ResolvedRoute:
         raise RouteConfigError(
             code="invalid_route",
             message=f"Unknown route: {route}",
-            details={"route": route, "available_routes": [item.route for item in ROUTES]},
+            details={
+                "route": route,
+                "available_routes": [item.route for item in ROUTES],
+            },
         )
 
     if definition.route == "local_basic":
@@ -267,7 +272,9 @@ def resolve_route(route: str) -> ResolvedRoute:
         )
 
     if definition.route == "layout_block":
-        api_key, api_key_env = _first_env("PPT_LAYOUT_BLOCK_API_KEY", "SILICONFLOW_API_KEY")
+        api_key, api_key_env = _first_env(
+            "PPT_LAYOUT_BLOCK_API_KEY", "SILICONFLOW_API_KEY"
+        )
         missing = [] if api_key else ["PPT_LAYOUT_BLOCK_API_KEY or SILICONFLOW_API_KEY"]
         if missing:
             raise RouteConfigError(
@@ -281,6 +288,7 @@ def resolve_route(route: str) -> ResolvedRoute:
         prompt_preset = _env("PPT_LAYOUT_BLOCK_PROMPT_PRESET") or "qwen_vl"
         options = {
             "parse_provider": "local",
+            "enable_ocr": True,
             "ocr_provider": "aiocr",
             "ocr_ai_provider": provider,
             "ocr_ai_base_url": base_url,
@@ -296,6 +304,7 @@ def resolve_route(route: str) -> ResolvedRoute:
             options=options,
             effective_config={
                 "parse_provider": "local",
+                "enable_ocr": True,
                 "ocr_provider": "aiocr",
                 "ocr_ai_chain_mode": "layout_block",
                 "ocr_ai_provider": provider,
@@ -321,6 +330,7 @@ def resolve_route(route: str) -> ResolvedRoute:
         prompt_preset = _env("PPT_DIRECT_PROMPT_PRESET") or "deepseek_ocr"
         options = {
             "parse_provider": "local",
+            "enable_ocr": True,
             "ocr_provider": "aiocr",
             "ocr_ai_provider": provider,
             "ocr_ai_base_url": base_url,
@@ -336,6 +346,7 @@ def resolve_route(route: str) -> ResolvedRoute:
             options=options,
             effective_config={
                 "parse_provider": "local",
+                "enable_ocr": True,
                 "ocr_provider": "aiocr",
                 "ocr_ai_chain_mode": "direct",
                 "ocr_ai_provider": provider,
@@ -347,7 +358,9 @@ def resolve_route(route: str) -> ResolvedRoute:
         )
 
     if definition.route == "doc_parser":
-        api_key, api_key_env = _first_env("PPT_DOC_PARSER_API_KEY", "SILICONFLOW_API_KEY")
+        api_key, api_key_env = _first_env(
+            "PPT_DOC_PARSER_API_KEY", "SILICONFLOW_API_KEY"
+        )
         missing = [] if api_key else ["PPT_DOC_PARSER_API_KEY or SILICONFLOW_API_KEY"]
         if missing:
             raise RouteConfigError(
@@ -361,6 +374,7 @@ def resolve_route(route: str) -> ResolvedRoute:
         max_side_px = _env("PPT_DOC_PARSER_MAX_SIDE_PX") or "2200"
         options = {
             "parse_provider": "local",
+            "enable_ocr": True,
             "ocr_provider": "aiocr",
             "ocr_ai_provider": provider,
             "ocr_ai_base_url": base_url,
@@ -376,6 +390,7 @@ def resolve_route(route: str) -> ResolvedRoute:
             options=options,
             effective_config={
                 "parse_provider": "local",
+                "enable_ocr": True,
                 "ocr_provider": "aiocr",
                 "ocr_ai_chain_mode": "doc_parser",
                 "ocr_ai_provider": provider,

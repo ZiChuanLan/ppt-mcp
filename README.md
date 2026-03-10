@@ -125,12 +125,12 @@ already has Git access to that private repo. Otherwise, use the local-clone
 
 High-level routes:
 
-- `local_basic`
-- `mineru`
-- `baidu_doc`
-- `layout_block`
-- `direct`
-- `doc_parser`
+- `基础本地解析` (`local_basic`)
+- `MinerU 云解析` (`mineru`)
+- `百度文档解析` (`baidu_doc`)
+- `本地切块识别` (`layout_block`)
+- `模型直出框和文字` (`direct`)
+- `内置文档解析` (`doc_parser`)
 
 This is the intended day-to-day interface. The old low-level form-field tool is
 still available as an escape hatch, but it is no longer the primary UX.
@@ -217,40 +217,44 @@ Local clone version:
 
 Then you can ask the AI things like:
 
-- `Use mineru to parse this PDF`
-- `Run this PDF with layout_block`
-- `Try doc_parser on this file`
+- `用 MinerU 云解析 跑这个 PDF`
+- `用 本地切块识别 跑这个 PDF`
+- `试一下 内置文档解析`
 
 The MCP tool will translate that route into the right lower-level job fields.
 
+You can also override the AI OCR model at call time through `ppt_convert_pdf`
+or `ppt_check_route`, for example by passing `ocr_ai_model`,
+`ocr_ai_provider`, `ocr_ai_base_url`, and `ocr_ai_prompt_preset`.
+
 ## Route env defaults
 
-`layout_block`
+`本地切块识别` / `layout_block`
 
 - key: `PPT_LAYOUT_BLOCK_API_KEY` or `SILICONFLOW_API_KEY`
 - provider default: `siliconflow`
 - base URL default: `https://api.siliconflow.cn/v1`
 - model default: `Qwen/Qwen2.5-VL-72B-Instruct`
 
-`direct`
+`模型直出框和文字` / `direct`
 
 - key: `PPT_DIRECT_API_KEY` or `SILICONFLOW_API_KEY`
 - provider default: `deepseek`
 - base URL default: `https://api.siliconflow.cn/v1`
 - model default: `deepseek-ai/DeepSeek-OCR`
 
-`doc_parser`
+`内置文档解析` / `doc_parser`
 
 - key: `PPT_DOC_PARSER_API_KEY` or `SILICONFLOW_API_KEY`
 - provider default: `openai`
 - base URL default: `https://api.siliconflow.cn/v1`
 - model default: `PaddlePaddle/PaddleOCR-VL-1.5`
 
-`mineru`
+`MinerU 云解析` / `mineru`
 
 - key: `MINERU_API_TOKEN`
 
-`baidu_doc`
+`百度文档解析` / `baidu_doc`
 
 - key: `BAIDU_API_KEY`
 - secret: `BAIDU_SECRET_KEY`
