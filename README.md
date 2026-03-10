@@ -93,6 +93,36 @@ The default path for personal use is now:
 - keep parser and OCR secrets in your local MCP `env`
 - tell the AI which `route` to use, for example `mineru` or `layout_block`
 
+You do not have to keep a local clone if you prefer a one-shot launcher. If the
+GitHub repo is accessible to your machine, `uvx` can run it directly from Git:
+
+```json
+{
+  "mcpServers": {
+    "ppt": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/ZiChuanLan/ppt-mcp",
+        "ppt-mcp"
+      ],
+      "env": {
+        "PPT_API_BASE_URL": "https://ppt.zichuanlan.top",
+        "MINERU_API_TOKEN": "your-mineru-token",
+        "BAIDU_API_KEY": "your-baidu-api-key",
+        "BAIDU_SECRET_KEY": "your-baidu-secret-key",
+        "SILICONFLOW_API_KEY": "your-siliconflow-key"
+      }
+    }
+  }
+}
+```
+
+If the repo stays private, `uvx` from GitHub only works when the local machine
+already has Git access to that private repo. Otherwise, use the local-clone
+`uv --directory ... run ppt-mcp` variant below.
+
 High-level routes:
 
 - `local_basic`
@@ -132,6 +162,34 @@ Normal use should prefer `ppt_convert_pdf(pdf_path, route, ...)` instead of the
 low-level `ppt_create_job`.
 
 ## Example MCP config
+
+`uvx` version, no local clone required when Git access is available:
+
+```json
+{
+  "mcpServers": {
+    "ppt": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/ZiChuanLan/ppt-mcp",
+        "ppt-mcp"
+      ],
+      "env": {
+        "PPT_API_BASE_URL": "https://ppt.zichuanlan.top",
+        "PPT_API_BEARER_TOKEN": "optional-gateway-token",
+        "MINERU_API_TOKEN": "your-mineru-token",
+        "BAIDU_API_KEY": "your-baidu-api-key",
+        "BAIDU_SECRET_KEY": "your-baidu-secret-key",
+        "SILICONFLOW_API_KEY": "your-siliconflow-key"
+      }
+    }
+  }
+}
+```
+
+Local clone version:
 
 ```json
 {
