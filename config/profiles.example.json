@@ -1,0 +1,112 @@
+{
+  "profiles": [
+    {
+      "profile_id": "local.default",
+      "kind": "local",
+      "title": "Local Default",
+      "summary": "No extra remote provider credentials; use local parsing defaults.",
+      "default_pipeline_ids": [
+        "local.basic"
+      ],
+      "capabilities": [
+        "native_parse"
+      ],
+      "job_defaults": {}
+    },
+    {
+      "profile_id": "mineru.prod",
+      "kind": "mineru",
+      "title": "MinerU Production",
+      "summary": "Server-side MinerU token and defaults.",
+      "default_pipeline_ids": [
+        "mineru.default"
+      ],
+      "capabilities": [
+        "structured_parse"
+      ],
+      "job_defaults": {
+        "mineru_api_token_env": "MINERU_API_TOKEN",
+        "mineru_model_version": "vlm",
+        "mineru_enable_formula": true,
+        "mineru_enable_table": true
+      }
+    },
+    {
+      "profile_id": "baidu.prod",
+      "kind": "baidu_doc",
+      "title": "Baidu Doc Production",
+      "summary": "Server-side Baidu document parsing credentials.",
+      "default_pipeline_ids": [
+        "baidu_doc.paddle_vl"
+      ],
+      "capabilities": [
+        "structured_parse"
+      ],
+      "job_defaults": {
+        "ocr_baidu_api_key_env": "BAIDU_API_KEY",
+        "ocr_baidu_secret_key_env": "BAIDU_SECRET_KEY",
+        "ocr_baidu_app_id_env": "BAIDU_APP_ID"
+      }
+    },
+    {
+      "profile_id": "siliconflow.qwen-vl-prod",
+      "kind": "aiocr",
+      "title": "SiliconFlow Qwen VL",
+      "summary": "Qwen VL profile for layout_block OCR.",
+      "default_pipeline_ids": [
+        "local.aiocr.layout_block"
+      ],
+      "capabilities": [
+        "vision",
+        "ocr"
+      ],
+      "job_defaults": {
+        "ocr_ai_provider": "siliconflow",
+        "ocr_ai_base_url": "https://api.siliconflow.cn/v1",
+        "ocr_ai_api_key_env": "SILICONFLOW_API_KEY",
+        "ocr_ai_model": "Qwen/Qwen2.5-VL-72B-Instruct",
+        "ocr_ai_prompt_preset": "qwen_vl"
+      }
+    },
+    {
+      "profile_id": "deepseek.ocr-prod",
+      "kind": "aiocr",
+      "title": "DeepSeek OCR",
+      "summary": "DeepSeek OCR profile for direct OCR.",
+      "default_pipeline_ids": [
+        "local.aiocr.direct"
+      ],
+      "capabilities": [
+        "vision",
+        "ocr"
+      ],
+      "job_defaults": {
+        "ocr_ai_provider": "deepseek",
+        "ocr_ai_base_url": "https://api.siliconflow.cn/v1",
+        "ocr_ai_api_key_env": "SILICONFLOW_API_KEY",
+        "ocr_ai_model": "deepseek-ai/DeepSeek-OCR",
+        "ocr_ai_prompt_preset": "deepseek_ocr"
+      }
+    },
+    {
+      "profile_id": "paddleocr-vl.prod",
+      "kind": "aiocr",
+      "title": "PaddleOCR-VL",
+      "summary": "PaddleOCR-VL profile for doc_parser.",
+      "default_pipeline_ids": [
+        "local.aiocr.doc_parser"
+      ],
+      "capabilities": [
+        "vision",
+        "ocr",
+        "structured_parse"
+      ],
+      "job_defaults": {
+        "ocr_ai_provider": "openai",
+        "ocr_ai_base_url": "https://api.siliconflow.cn/v1",
+        "ocr_ai_api_key_env": "SILICONFLOW_API_KEY",
+        "ocr_ai_model": "PaddlePaddle/PaddleOCR-VL-1.5"
+      }
+    }
+  ]
+}
