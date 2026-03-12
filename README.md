@@ -1,141 +1,230 @@
 # ppt-mcp
 
-Local-first MCP server for the existing `ppt` PDF-to-PPT pipeline.
+`ppt-mcp` 是现有 `ppt` PDF 转 PPT 服务的 MCP 封装层。
 
-It does not reimplement parsing, OCR, or PPT generation. It wraps the running
-`ppt` API on the same machine and exposes it as MCP tools.
+它本身不重新实现 PDF 解析、OCR 或 PPT 生成，而是调用你已经在跑的
+`ppt` API，把它包装成 MCP tools，方便给 Claude Desktop、Cursor、Codex
+CLI 等客户端直接使用。
 
-## How local MCP uses the parsing pipeline
+## 它到底解决什么问题
 
-The parsing stack stays in the original repo:
+如果你已经有：
 
-1. Start the existing `ppt` service locally.
-2. Run this MCP server locally over `stdio`.
-3. Call `ppt_create_job` with a local `pdf_path`.
-4. This server reads that file and uploads it to the local `ppt` API.
-5. The existing `ppt` API + worker do all parsing/OCR/conversion work.
-6. Poll with `ppt_get_job_status`, then fetch output with
-   `ppt_download_result`.
+- `ppt` 主仓库：`/home/lan/workspace/ppt`
+- 正在运行的 `api / worker / redis`
 
-In other words, local MCP is only an orchestration layer. The actual parsing
-chain still lives in the original project.
+那 `ppt-mcp` 解决的是：
 
-## Prerequisites
+- 把“上传 PDF -> 创建任务 -> 轮询状态 -> 下载 PPT”这套流程封成 MCP tools
+- 让 AI 可以直接调用你的本地或远程 `ppt` 服务
+- 不必手动打开 Web 页面点来点去
 
-- Original repo available locally, for example at `/home/lan/workspace/ppt`
-- The `ppt` backend stack running locally
-- Python 3.11+
+一句话理解：
 
-Start the original service first:
+```text
+MCP Client -> ppt-mcp -> ppt API -> worker
+```
+
+## 推荐使用方式
+
+### 1. 本地 stdio MCP，最简单也最稳
+
+这是日常最推荐的方式。
+
+- `ppt` 服务跑在本机
+- `ppt-mcp` 也跑在本机
+- MCP transport 用 `stdio`
+- `PPT_API_BASE_URL` 指向 `http://127.0.0.1:8000`
+
+这时：
+
+- 浏览器用户走 Web 页面
+- MCP 用户走本地 API
+- 两条链路互不干扰
+
+### 2. 本地 stdio MCP，连接远程 `ppt`
+
+适合：
+
+- 你的 AI 客户端在本机
+- 但 PDF 转换服务在远程服务器
+
+这时：
+
+- `PPT_API_BASE_URL` 指向远程 `ppt` 服务根地址
+- `ppt-mcp` 仍然在本机运行
+- `ppt_create_job` 会读取本地 PDF，然后上传到远程 API
+
+### 3. 远程 `ppt-mcp-remote`
+
+这个模式更像“把 MCP 服务也部署到服务器上”。
+
+适合：
+
+- 需要团队共用
+- 需要统一入口
+- 需要 Streamable HTTP MCP
+
+但这条路复杂度更高：
+
+- 需要额外的入口认证
+- 需要处理上传源文件
+- 需要考虑下载和权限
+
+如果只是你自己本机用，优先用第 1 种。
+
+## 最容易搞混的地址问题
+
+`PPT_API_BASE_URL` 应该指向 `ppt` 服务根地址，而不是 `/api/v1`。
+
+正确示例：
+
+```env
+PPT_API_BASE_URL=http://127.0.0.1:8000
+```
+
+或者：
+
+```env
+PPT_API_BASE_URL=https://ppt.example.com
+```
+
+不要写成：
+
+```env
+PPT_API_BASE_URL=http://127.0.0.1:8000/api/v1
+```
+
+也不建议默认写成 Web 入口：
+
+```env
+PPT_API_BASE_URL=http://127.0.0.1:3000
+```
+
+因为 `3000` 这条链路是 Web 入口，通常会受 `WEB_ACCESS_PASSWORD` 影响。
+
+如果你只是给 `ppt-mcp` 自己使用，最稳的就是直连：
+
+```env
+PPT_API_BASE_URL=http://127.0.0.1:8000
+```
+
+## 与 `ppt` 主仓库的鉴权关系
+
+如果 `ppt` 主仓库没有配置 `API_BEARER_TOKEN`：
+
+- `ppt-mcp` 直连 `127.0.0.1:8000` 就能用
+
+如果 `ppt` 主仓库配置了：
+
+```env
+API_BEARER_TOKEN=your-shared-secret
+```
+
+那 `ppt-mcp` 也要配置同一个值：
+
+```env
+PPT_API_BEARER_TOKEN=your-shared-secret
+```
+
+可以把它理解成：
+
+- `API_BEARER_TOKEN`
+  是后端 API 要求的密码
+- `PPT_API_BEARER_TOKEN`
+  是 `ppt-mcp` 发请求时带上的那个密码
+
+通常这两个值应该一致。
+
+## 环境变量
+
+仓库里提供了一个示例文件：
+
+```bash
+cp .env.example .env
+```
+
+### 本地 stdio 模式最少需要这些
+
+```env
+PPT_API_BASE_URL=http://127.0.0.1:8000
+PPT_API_TIMEOUT_SECONDS=120
+```
+
+如果后端 API 开了 Bearer，再加：
+
+```env
+PPT_API_BEARER_TOKEN=your-shared-secret
+```
+
+### 常用变量说明
+
+| 变量 | 说明 |
+| --- | --- |
+| `PPT_API_BASE_URL` | `ppt` 服务根地址，不带 `/api/v1` |
+| `PPT_API_TIMEOUT_SECONDS` | MCP 请求 API 的超时时间 |
+| `PPT_API_BEARER_TOKEN` | 直连 `ppt` API 时使用的 Bearer |
+| `MINERU_API_TOKEN` | MinerU 云解析 token |
+| `BAIDU_API_KEY` | 百度文档解析 key |
+| `BAIDU_SECRET_KEY` | 百度文档解析 secret |
+| `SILICONFLOW_API_KEY` | 通用远程视觉/OCR 模型 key |
+
+### 远程 `ppt-mcp-remote` 额外变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `PPT_MCP_BIND_HOST` | 远程 MCP 监听地址，默认 `0.0.0.0` |
+| `PPT_MCP_BIND_PORT` | 远程 MCP 端口，默认 `8080` |
+| `PPT_MCP_PUBLIC_BASE_URL` | 远程 MCP 对外访问地址 |
+| `PPT_MCP_SERVER_TOKEN` | 远程 MCP 自己的入口密码 |
+| `PPT_MCP_PROFILE_STORE` | 远程 profile 配置文件路径 |
+| `PPT_MCP_DATA_DIR` | 远程上传缓存与元数据目录 |
+
+## 先启动主服务
+
+在使用 `ppt-mcp` 前，先把原始 `ppt` 服务跑起来。
 
 ```bash
 cd /home/lan/workspace/ppt
 docker compose up -d --build api worker redis
 ```
 
-By default this MCP server talks to `http://127.0.0.1:8000`.
+默认情况下，`ppt-mcp` 会连接 `http://127.0.0.1:8000`。
 
-You can also point it at a remote server:
-
-- `PPT_API_BASE_URL=https://ppt.example.com`
-- or behind a sub-path proxy:
-  `PPT_API_BASE_URL=https://gateway.example.com/ppt`
-- optional gateway auth:
-  `PPT_API_BEARER_TOKEN=...`
-
-`PPT_API_BASE_URL` should point to the service root or mounted prefix, not to
-`/api/v1`.
-
-## Install
+## 安装
 
 ```bash
 cd /home/lan/workspace/ppt-mcp
 uv sync
 ```
 
-## Run
+## 运行
+
+### 本地 stdio
 
 ```bash
 cd /home/lan/workspace/ppt-mcp
 uv run ppt-mcp
 ```
 
-Environment variables:
+### 远程 MCP 服务
 
-- `PPT_API_BASE_URL`
-  Default: `http://127.0.0.1:8000`
-- `PPT_API_TIMEOUT_SECONDS`
-  Default: `120`
-- `PPT_API_BEARER_TOKEN`
-  Optional bearer token for a reverse proxy or API gateway
-
-Hosted remote server variables:
-
-- `PPT_MCP_BIND_HOST`
-  Default: `0.0.0.0`
-- `PPT_MCP_BIND_PORT`
-  Default: `8080`
-- `PPT_MCP_PUBLIC_BASE_URL`
-  Example: `https://ppt.zichuanlan.top/mcp-gateway`
-- `PPT_MCP_SERVER_TOKEN`
-  Optional bearer token required for MCP and download routes
-- `PPT_MCP_PROFILE_STORE`
-  Path to the server-side profile catalog JSON
-- `PPT_MCP_DATA_DIR`
-  Path for staged uploads and source metadata
-
-## Main stdio workflow
-
-The default path for personal use is now:
-
-- run `ppt-mcp` locally over `stdio`
-- point it at your existing `ppt` server with `PPT_API_BASE_URL`
-- keep parser and OCR secrets in your local MCP `env`
-- tell the AI which `route` to use, for example `mineru` or `layout_block`
-
-You do not have to keep a local clone if you prefer a one-shot launcher. If the
-GitHub repo is accessible to your machine, `uvx` can run it directly from Git:
-
-```json
-{
-  "mcpServers": {
-    "ppt": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/ZiChuanLan/ppt-mcp",
-        "ppt-mcp"
-      ],
-      "env": {
-        "PPT_API_BASE_URL": "https://ppt.zichuanlan.top",
-        "MINERU_API_TOKEN": "your-mineru-token",
-        "BAIDU_API_KEY": "your-baidu-api-key",
-        "BAIDU_SECRET_KEY": "your-baidu-secret-key",
-        "SILICONFLOW_API_KEY": "your-siliconflow-key"
-      }
-    }
-  }
-}
+```bash
+cd /home/lan/workspace/ppt-mcp
+export PPT_API_BASE_URL=http://127.0.0.1:8000
+export PPT_MCP_PUBLIC_BASE_URL=https://ppt.zichuanlan.top
+export PPT_MCP_SERVER_TOKEN=change-me
+uv run ppt-mcp-remote
 ```
 
-If the repo stays private, `uvx` from GitHub only works when the local machine
-already has Git access to that private repo. Otherwise, use the local-clone
-`uv --directory ... run ppt-mcp` variant below.
+这会暴露：
 
-High-level routes:
+- MCP endpoint: `POST/GET https://.../mcp`
+- health endpoint: `GET https://.../healthz`
+- upload endpoint: `PUT https://.../uploads/{source_id}?token=...`
+- result proxy: `GET https://.../jobs/{job_id}/download`
 
-- `基础本地解析` (`local_basic`)
-- `MinerU 云解析` (`mineru`)
-- `百度文档解析` (`baidu_doc`)
-- `本地切块识别` (`layout_block`)
-- `模型直出框和文字` (`direct`)
-- `内置文档解析` (`doc_parser`)
-
-This is the intended day-to-day interface. The old low-level form-field tool is
-still available as an escape hatch, but it is no longer the primary UX.
-
-## Tools
+## 工具列表
 
 - `ppt_list_routes`
 - `ppt_check_route`
@@ -151,153 +240,36 @@ still available as an escape hatch, but it is no longer the primary UX.
 - `ppt_list_ai_models`
 - `ppt_check_ai_ocr`
 
-## Common usage
+## 常用工作流
 
-Create a conversion job:
+日常使用推荐直接走高层工具：
 
-- `pdf_path` is a local filesystem path on the same machine as the MCP server
-- `options` is forwarded to the existing `/api/v1/jobs` form fields
+- `ppt_list_routes`
+- `ppt_check_route`
+- `ppt_convert_pdf`
 
-Normal use should prefer `ppt_convert_pdf(pdf_path, route, ...)` instead of the
-low-level `ppt_create_job`.
+而不是一开始就手填所有底层 job fields。
 
-## Example MCP config
+### 典型流程
 
-`uvx` version, no local clone required when Git access is available:
+1. 用 `ppt_list_routes` 看有哪些可用路线
+2. 选一个路线，例如 `本地切块识别`、`MinerU 云解析`
+3. 用 `ppt_convert_pdf(pdf_path, route=...)` 提交任务
+4. 用 `ppt_get_job_status` 轮询进度
+5. 用 `ppt_download_result` 下载结果
 
-```json
-{
-  "mcpServers": {
-    "ppt": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/ZiChuanLan/ppt-mcp",
-        "ppt-mcp"
-      ],
-      "env": {
-        "PPT_API_BASE_URL": "https://ppt.zichuanlan.top",
-        "PPT_API_BEARER_TOKEN": "optional-gateway-token",
-        "MINERU_API_TOKEN": "your-mineru-token",
-        "BAIDU_API_KEY": "your-baidu-api-key",
-        "BAIDU_SECRET_KEY": "your-baidu-secret-key",
-        "SILICONFLOW_API_KEY": "your-siliconflow-key"
-      }
-    }
-  }
-}
-```
+## 常用路线
 
-Local clone version:
+- `基础本地解析` (`local_basic`)
+- `MinerU 云解析` (`mineru`)
+- `百度文档解析` (`baidu_doc`)
+- `本地切块识别` (`layout_block`)
+- `模型直出框和文字` (`direct`)
+- `内置文档解析` (`doc_parser`)
 
-```json
-{
-  "mcpServers": {
-    "ppt": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/home/lan/workspace/ppt-mcp",
-        "run",
-        "ppt-mcp"
-      ],
-      "env": {
-        "PPT_API_BASE_URL": "https://ppt.zichuanlan.top",
-        "PPT_API_BEARER_TOKEN": "optional-gateway-token",
-        "MINERU_API_TOKEN": "your-mineru-token",
-        "BAIDU_API_KEY": "your-baidu-api-key",
-        "BAIDU_SECRET_KEY": "your-baidu-secret-key",
-        "SILICONFLOW_API_KEY": "your-siliconflow-key"
-      }
-    }
-  }
-}
-```
+## MCP 配置示例
 
-Then you can ask the AI things like:
-
-- `用 MinerU 云解析 跑这个 PDF`
-- `用 本地切块识别 跑这个 PDF`
-- `试一下 内置文档解析`
-
-The MCP tool will translate that route into the right lower-level job fields.
-
-You can also override the AI OCR model at call time through `ppt_convert_pdf`
-or `ppt_check_route`, for example by passing `ocr_ai_model`,
-`ocr_ai_provider`, `ocr_ai_base_url`, and `ocr_ai_prompt_preset`.
-
-## Route env defaults
-
-`本地切块识别` / `layout_block`
-
-- key: `PPT_LAYOUT_BLOCK_API_KEY` or `SILICONFLOW_API_KEY`
-- provider default: `siliconflow`
-- base URL default: `https://api.siliconflow.cn/v1`
-- model default: `Qwen/Qwen2.5-VL-72B-Instruct`
-
-`模型直出框和文字` / `direct`
-
-- key: `PPT_DIRECT_API_KEY` or `SILICONFLOW_API_KEY`
-- provider default: `deepseek`
-- base URL default: `https://api.siliconflow.cn/v1`
-- model default: `deepseek-ai/DeepSeek-OCR`
-
-`内置文档解析` / `doc_parser`
-
-- key: `PPT_DOC_PARSER_API_KEY` or `SILICONFLOW_API_KEY`
-- provider default: `openai`
-- base URL default: `https://api.siliconflow.cn/v1`
-- model default: `PaddlePaddle/PaddleOCR-VL-1.5`
-
-`MinerU 云解析` / `mineru`
-
-- key: `MINERU_API_TOKEN`
-
-`百度文档解析` / `baidu_doc`
-
-- key: `BAIDU_API_KEY`
-- secret: `BAIDU_SECRET_KEY`
-
-Common `options` examples:
-
-```json
-{
-  "parse_provider": "local",
-  "ocr_provider": "aiocr",
-  "ocr_ai_provider": "openai",
-  "ocr_ai_base_url": "https://api.openai.com/v1",
-  "ocr_ai_api_key": "sk-...",
-  "ocr_ai_model": "gpt-4.1-mini",
-  "ocr_ai_chain_mode": "layout_block",
-  "retain_process_artifacts": true
-}
-```
-
-List AI OCR models:
-
-```json
-{
-  "provider": "openai",
-  "api_key": "sk-...",
-  "base_url": "https://api.openai.com/v1",
-  "capability": "vision"
-}
-```
-
-Check an AI OCR model:
-
-```json
-{
-  "provider": "openai",
-  "api_key": "sk-...",
-  "base_url": "https://api.openai.com/v1",
-  "model": "gpt-4.1-mini",
-  "ocr_ai_chain_mode": "layout_block"
-}
-```
-
-## Claude Desktop example
+### 1. 本地 clone 方式
 
 ```json
 {
@@ -318,59 +290,160 @@ Check an AI OCR model:
 }
 ```
 
-## Why local first
+如果后端 API 开了 Bearer：
 
-This project is a better fit for local `stdio` MCP before remote MCP because:
+```json
+{
+  "mcpServers": {
+    "ppt": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/home/lan/workspace/ppt-mcp",
+        "run",
+        "ppt-mcp"
+      ],
+      "env": {
+        "PPT_API_BASE_URL": "http://127.0.0.1:8000",
+        "PPT_API_BEARER_TOKEN": "your-shared-secret"
+      }
+    }
+  }
+}
+```
 
-- input files are local PDFs
-- conversions are long-running background jobs
-- output is a generated PPTX plus optional artifacts
-- the existing project already has a local API/worker architecture
+### 2. `uvx` 方式
 
-Remote MCP can be added later, but it adds auth, upload, artifact access, and
-multi-tenant concerns that are unnecessary for the first version.
+```json
+{
+  "mcpServers": {
+    "ppt": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/ZiChuanLan/ppt-mcp",
+        "ppt-mcp"
+      ],
+      "env": {
+        "PPT_API_BASE_URL": "https://ppt.zichuanlan.top",
+        "PPT_API_BEARER_TOKEN": "your-shared-secret",
+        "MINERU_API_TOKEN": "your-mineru-token",
+        "BAIDU_API_KEY": "your-baidu-api-key",
+        "BAIDU_SECRET_KEY": "your-baidu-secret-key",
+        "SILICONFLOW_API_KEY": "your-siliconflow-key"
+      }
+    }
+  }
+}
+```
 
-## Remote server mode
+## 常见参数示例
 
-You can keep the MCP server on your local machine and point it at a remote
-`ppt` deployment. In that setup:
+### `ppt_convert_pdf` / `ppt_create_job`
 
-- `ppt_create_job` still accepts your local `pdf_path`
-- this MCP server reads the local file and uploads it over HTTP to the remote
-  `ppt` API
-- parsing and conversion happen on the remote server
-- `ppt_download_result` downloads the generated PPTX back to your local machine
+```json
+{
+  "parse_provider": "local",
+  "ocr_provider": "aiocr",
+  "ocr_ai_provider": "openai",
+  "ocr_ai_base_url": "https://api.openai.com/v1",
+  "ocr_ai_api_key": "sk-...",
+  "ocr_ai_model": "gpt-4.1-mini",
+  "ocr_ai_chain_mode": "layout_block",
+  "retain_process_artifacts": true
+}
+```
 
-Security note:
+### 列模型
 
-- the current `ppt` app does not expose built-in end-user API auth
-- if you put it on a server, prefer HTTPS plus a reverse proxy, VPN, or SSH
-  tunnel
+```json
+{
+  "provider": "openai",
+  "api_key": "sk-...",
+  "base_url": "https://api.openai.com/v1",
+  "capability": "vision"
+}
+```
 
-## Next design docs
+### 检查 AI OCR 模型
+
+```json
+{
+  "provider": "openai",
+  "api_key": "sk-...",
+  "base_url": "https://api.openai.com/v1",
+  "model": "gpt-4.1-mini",
+  "ocr_ai_chain_mode": "layout_block"
+}
+```
+
+## 路线默认依赖的环境变量
+
+### `本地切块识别` / `layout_block`
+
+- key: `PPT_LAYOUT_BLOCK_API_KEY` 或 `SILICONFLOW_API_KEY`
+- provider 默认：`siliconflow`
+- base URL 默认：`https://api.siliconflow.cn/v1`
+- model 默认：`Qwen/Qwen2.5-VL-72B-Instruct`
+
+### `模型直出框和文字` / `direct`
+
+- key: `PPT_DIRECT_API_KEY` 或 `SILICONFLOW_API_KEY`
+- provider 默认：`deepseek`
+- base URL 默认：`https://api.siliconflow.cn/v1`
+- model 默认：`deepseek-ai/DeepSeek-OCR`
+
+### `内置文档解析` / `doc_parser`
+
+- key: `PPT_DOC_PARSER_API_KEY` 或 `SILICONFLOW_API_KEY`
+- provider 默认：`openai`
+- base URL 默认：`https://api.siliconflow.cn/v1`
+- model 默认：`PaddlePaddle/PaddleOCR-VL-1.5`
+
+### `MinerU 云解析` / `mineru`
+
+- key: `MINERU_API_TOKEN`
+
+### `百度文档解析` / `baidu_doc`
+
+- key: `BAIDU_API_KEY`
+- secret: `BAIDU_SECRET_KEY`
+
+## 为什么还是建议 local-first
+
+这个项目更适合先做本地 `stdio` MCP，再考虑远程化。
+
+原因很简单：
+
+- 输入通常是本地 PDF 文件
+- 转换任务是长任务
+- 输出是 PPTX 和可选过程产物
+- 现有 `ppt` 项目本来就是本地 API + worker 架构
+
+远程 MCP 当然能做，但会马上引入这些额外问题：
+
+- 认证
+- 上传
+- 下载
+- 权限
+- 多用户隔离
+
+如果你只是自己用，先不要给自己加这些复杂度。
+
+## 远程模式的安全建议
+
+如果你把 `ppt` 部署到远程服务器：
+
+- 优先 HTTPS
+- 优先让 `ppt-mcp` 直连真实 API 根地址
+- 如果 `ppt` 开了 `API_BEARER_TOKEN`，记得同步到 `PPT_API_BEARER_TOKEN`
+- 不建议默认把 `PPT_API_BASE_URL` 指向 Web 域名入口，除非你明确要复用 Web 的访问控制
+
+## 后续设计文档
 
 - `docs/remote-mcp-prd.md`
 - `docs/remote-mcp-tool-contracts.md`
 
-These remote hosted docs and the `ppt-mcp-remote` code are intentionally kept
-for a future productized remote MCP service. For now they are secondary to the
-simpler stdio route-driven flow above.
-
-## Hosted remote server
-
-Run the hosted remote MCP server:
-
-```bash
-cd /home/lan/workspace/ppt-mcp
-export PPT_API_BASE_URL=http://127.0.0.1:8000
-export PPT_MCP_PUBLIC_BASE_URL=https://ppt.zichuanlan.top
-export PPT_MCP_SERVER_TOKEN=change-me
-uv run ppt-mcp-remote
-```
-
-This starts:
-
-- MCP endpoint: `POST/GET https://.../mcp`
-- health endpoint: `GET https://.../healthz`
-- upload endpoint: `PUT https://.../uploads/{source_id}?token=...`
-- result proxy: `GET https://.../jobs/{job_id}/download`
+这些文档主要对应将来更产品化的远程 MCP 方案。
+当前日常使用仍然优先推荐本地 `stdio` 模式。
