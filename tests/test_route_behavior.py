@@ -62,6 +62,8 @@ class RouteBehaviorTests(unittest.TestCase):
             result = server.ppt_convert_pdf(
                 pdf_path="/tmp/demo.pdf",
                 route="本地切块识别",
+                scanned_page_mode="fullpage",
+                remove_footer_notebooklm=False,
                 ocr_ai_provider="openai",
                 ocr_ai_base_url="https://example.com/v1",
                 ocr_ai_model="gpt-4.1-mini",
@@ -117,10 +119,39 @@ class RouteBehaviorTests(unittest.TestCase):
         result = server.ppt_check_route(route="本地切块识别")
 
         self.assertTrue(result["ok"])
+        self.assertFalse(result["ready_for_submit"])
+        self.assertEqual(
+            result["missing_fields"],
+            ["scanned_page_mode", "remove_footer_notebooklm"],
+        )
         steps = result["workflow_guidance"]["steps"]
         self.assertEqual(steps[0]["field"], "scanned_page_mode")
         self.assertEqual(steps[1]["field"], "remove_footer_notebooklm")
         self.assertEqual(steps[2]["field"], "ocr_ai_model")
+
+    def test_check_route_marks_submit_ready_after_required_decisions(self) -> None:
+        result = server.ppt_check_route(
+            route="本地切块识别",
+            scanned_page_mode="fullpage",
+            remove_footer_notebooklm=False,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["ready_for_submit"])
+        self.assertEqual(result["missing_fields"], [])
+
+    def test_convert_pdf_rejects_missing_required_decisions(self) -> None:
+        result = server.ppt_convert_pdf(
+            pdf_path="/tmp/demo.pdf",
+            route="本地切块识别",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "missing_required_decision")
+        self.assertEqual(
+            result["error"]["details"]["missing_fields"],
+            ["scanned_page_mode", "remove_footer_notebooklm"],
+        )
 
 
 if __name__ == "__main__":

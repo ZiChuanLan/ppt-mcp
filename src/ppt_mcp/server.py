@@ -99,6 +99,47 @@ def _apply_conversion_preferences(
     return patched_options, patched_effective_config
 
 
+def _missing_submit_decisions(
+    *,
+    scanned_page_mode: Literal["fullpage", "segmented"] | None,
+    remove_footer_notebooklm: bool | None,
+) -> list[str]:
+    missing: list[str] = []
+    if scanned_page_mode is None:
+        missing.append("scanned_page_mode")
+    if remove_footer_notebooklm is None:
+        missing.append("remove_footer_notebooklm")
+    return missing
+
+
+def _require_submit_decisions(
+    *,
+    route_selected: bool,
+    ai_route: bool,
+    scanned_page_mode: Literal["fullpage", "segmented"] | None,
+    remove_footer_notebooklm: bool | None,
+) -> None:
+    missing = _missing_submit_decisions(
+        scanned_page_mode=scanned_page_mode,
+        remove_footer_notebooklm=remove_footer_notebooklm,
+    )
+    if not missing:
+        return
+    raise RouteConfigError(
+        code="missing_required_decision",
+        message=(
+            "ppt_convert_pdf requires explicit user-confirmed decisions before submission"
+        ),
+        details={
+            "missing_fields": missing,
+            "workflow_guidance": _build_workflow_guidance(
+                route_selected=route_selected,
+                ai_route=ai_route,
+            ),
+        },
+    )
+
+
 def _build_ai_route_overrides(
     *,
     ocr_ai_provider: str | None = None,
@@ -218,13 +259,20 @@ def ppt_check_route(
     """
     try:
         resolved = resolve_route(route)
+        ai_route = bool(resolved.options.get("ocr_provider") == "aiocr")
         effective_config = dict(resolved.effective_config)
-        options, effective_config = _apply_conversion_preferences(
-            options=resolved.options,
-            effective_config=effective_config,
+        options = dict(resolved.options)
+        missing_fields = _missing_submit_decisions(
             scanned_page_mode=scanned_page_mode,
             remove_footer_notebooklm=remove_footer_notebooklm,
         )
+        if not missing_fields:
+            options, effective_config = _apply_conversion_preferences(
+                options=options,
+                effective_config=effective_config,
+                scanned_page_mode=scanned_page_mode,
+                remove_footer_notebooklm=remove_footer_notebooklm,
+            )
         _, effective_config = _apply_ai_route_overrides(
             route=resolved.title,
             options=options,
@@ -246,9 +294,11 @@ def ppt_check_route(
             "ready": True,
             "effective_config": effective_config,
             "missing_envs": [],
+            "ready_for_submit": not missing_fields,
+            "missing_fields": missing_fields,
             "workflow_guidance": _build_workflow_guidance(
                 route_selected=True,
-                ai_route=bool(options.get("ocr_provider") == "aiocr"),
+                ai_route=ai_route,
             ),
         }
     except RouteConfigError as exc:
@@ -297,6 +347,13 @@ def ppt_convert_pdf(
     """
     try:
         resolved = resolve_route(route)
+        ai_route = bool(resolved.options.get("ocr_provider") == "aiocr")
+        _require_submit_decisions(
+            route_selected=True,
+            ai_route=ai_route,
+            scanned_page_mode=scanned_page_mode,
+            remove_footer_notebooklm=remove_footer_notebooklm,
+        )
         options = dict(resolved.options)
         effective_config = dict(resolved.effective_config)
         if page_start is not None:

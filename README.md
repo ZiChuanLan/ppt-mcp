@@ -267,6 +267,8 @@ uv run ppt-mcp-remote
 - `scanned_page_mode=fullpage`
 - `remove_footer_notebooklm=false`
 
+`ppt_convert_pdf` 现在会拒绝未确认完关键决策的提交；如果还没明确 `scanned_page_mode` 和 `remove_footer_notebooklm`，它会返回缺失字段和下一步该问什么，而不是静默套默认值直接开跑。
+
 路径说明：
 
 - 如果 `ppt-mcp` 跑在 WSL，而 MCP 客户端给的是 Windows 路径，例如 `C:\Users\27783\Desktop\file.pdf`，本地 stdio 模式现在会自动转换成 `/mnt/c/Users/27783/Desktop/file.pdf`
