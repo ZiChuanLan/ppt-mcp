@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -31,10 +32,14 @@ class RouteBehaviorTests(unittest.TestCase):
             clear=False,
         )
         self.env_patcher.start()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.demo_pdf = Path(self.temp_dir.name) / "demo.pdf"
+        self.demo_pdf.write_bytes(b"%PDF-1.4\n%stub\n")
         server._ROUTE_WORKFLOWS.clear()
 
     def tearDown(self) -> None:
         server._ROUTE_WORKFLOWS.clear()
+        self.temp_dir.cleanup()
         self.env_patcher.stop()
 
     def _lock_workflow(self, route: str = "本地切块识别") -> str:
@@ -47,14 +52,14 @@ class RouteBehaviorTests(unittest.TestCase):
         self,
         workflow_id: str,
         *,
-        pdf_path: str = "/tmp/demo.pdf",
+        pdf_path: str | None = None,
         page_range_decision: str = "all_pages",
         page_start: int | None = None,
         page_end: int | None = None,
     ) -> dict[str, object]:
         result = server.ppt_set_conversion_target(
             route_workflow_id=workflow_id,
-            pdf_path=pdf_path,
+            pdf_path=pdf_path or str(self.demo_pdf),
             page_range_decision=page_range_decision,
             page_start=page_start,
             page_end=page_end,
@@ -173,16 +178,30 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "missing_route_workflow")
         self.assertEqual(result["error"]["details"]["next_field"], "route_workflow_id")
 
+    def test_set_conversion_target_rejects_nonexistent_pdf_path(self) -> None:
+        workflow_id = self._lock_workflow()
+
+        result = server.ppt_set_conversion_target(
+            route_workflow_id=workflow_id,
+            pdf_path=str(self.demo_pdf.parent / "missing.pdf"),
+            page_range_decision="all_pages",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "pdf_path_not_found")
+        self.assertEqual(result["error"]["details"]["next_field"], "pdf_path")
+        self.assertEqual(result["error"]["details"]["next_tool"], "ppt_set_conversion_target")
+
     def test_set_conversion_target_persists_pdf_path_and_all_pages(self) -> None:
         workflow_id = self._lock_workflow()
 
         result = self._set_target(
             workflow_id,
-            pdf_path="/tmp/demo.pdf",
+            pdf_path=str(self.demo_pdf),
             page_range_decision="all_pages",
         )
 
-        self.assertEqual(result["current_decisions"]["pdf_path"], "/tmp/demo.pdf")
+        self.assertEqual(result["current_decisions"]["pdf_path"], str(self.demo_pdf.resolve()))
         self.assertEqual(result["current_decisions"]["page_range_decision"], "all_pages")
         self.assertEqual(result["current_decisions"]["page_range_label"], "all_pages")
         self.assertEqual(result["next_tool"], "ppt_set_route_options")
@@ -192,7 +211,7 @@ class RouteBehaviorTests(unittest.TestCase):
 
         result = self._set_target(
             workflow_id,
-            pdf_path="/tmp/demo.pdf",
+            pdf_path=str(self.demo_pdf),
             page_range_decision="page_range",
             page_start=4,
             page_end=6,
@@ -209,7 +228,7 @@ class RouteBehaviorTests(unittest.TestCase):
 
         result = server.ppt_set_conversion_target(
             route_workflow_id=workflow_id,
-            pdf_path="/tmp/demo.pdf",
+            pdf_path=str(self.demo_pdf),
             page_range_decision="page_range",
         )
 
@@ -224,7 +243,7 @@ class RouteBehaviorTests(unittest.TestCase):
 
         result = server.ppt_set_conversion_target(
             route_workflow_id=workflow_id,
-            pdf_path="/tmp/demo.pdf",
+            pdf_path=str(self.demo_pdf),
             page_range_decision="all_pages",
             page_start=1,
             page_end=2,
@@ -239,8 +258,24 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "missing_route_workflow")
 
+    def test_set_route_options_requires_conversion_target_first(self) -> None:
+        workflow_id = self._lock_workflow()
+
+        result = server.ppt_set_route_options(
+            route_workflow_id=workflow_id,
+            scanned_page_mode="fullpage",
+            remove_footer_notebooklm=False,
+            ocr_ai_model_decision="route_default",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "workflow_step_out_of_order")
+        self.assertEqual(result["error"]["details"]["next_tool"], "ppt_set_conversion_target")
+        self.assertEqual(result["error"]["details"]["blocking_fields"], ["pdf_path", "page_range_decision"])
+
     def test_set_route_options_rejects_ai_override_for_non_ai_route(self) -> None:
         workflow_id = self._lock_workflow(route="基础本地解析")
+        self._set_target(workflow_id)
 
         result = server.ppt_set_route_options(
             route_workflow_id=workflow_id,
@@ -291,6 +326,10 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["display_name"], "本地切块识别")
         self.assertEqual(result["route_workflow_id"], workflow_id)
+        self.assertEqual(
+            result["route_workflow"]["next_required_step"]["next_tool"],
+            "ppt_set_route_options",
+        )
         self.assertEqual(result["capability"], "ocr")
         self.assertEqual(result["choice_display_lines"], ["0. deepseek-ai/DeepSeek-OCR [route_default]", "1. olmOCR"])
         self.assertEqual(result["selection_instructions"]["preferred_choice_field"], "ocr_ai_model_choice_index")
@@ -306,11 +345,22 @@ class RouteBehaviorTests(unittest.TestCase):
 
     def test_list_route_models_rejects_non_ai_route(self) -> None:
         workflow_id = self._lock_workflow(route="基础本地解析")
+        self._set_target(workflow_id)
 
         result = server.ppt_list_route_models(route_workflow_id=workflow_id)
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "invalid_route_model_listing")
+
+    def test_list_route_models_requires_conversion_target_first(self) -> None:
+        workflow_id = self._lock_workflow()
+
+        result = server.ppt_list_route_models(route_workflow_id=workflow_id)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "workflow_step_out_of_order")
+        self.assertEqual(result["error"]["details"]["next_tool"], "ppt_set_conversion_target")
+        self.assertEqual(result["error"]["details"]["blocking_fields"], ["pdf_path", "page_range_decision"])
 
     def test_set_route_options_accepts_model_choice_index_on_same_gateway(self) -> None:
         workflow_id = self._lock_workflow()
@@ -459,7 +509,7 @@ class RouteBehaviorTests(unittest.TestCase):
         )
 
     def test_create_job_requires_explicit_low_level_override_confirmation(self) -> None:
-        result = server.ppt_create_job(pdf_path="/tmp/demo.pdf")
+        result = server.ppt_create_job(pdf_path=str(self.demo_pdf))
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "missing_required_decision")
@@ -477,12 +527,22 @@ class RouteBehaviorTests(unittest.TestCase):
             ],
         )
 
+    def test_create_job_rejects_nonexistent_pdf_path_after_override(self) -> None:
+        result = server.ppt_create_job(
+            pdf_path=str(self.demo_pdf.parent / "missing.pdf"),
+            low_level_override_confirmed=True,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "pdf_path_not_found")
+        self.assertEqual(result["error"]["details"]["next_tool"], "ppt_create_job")
+
     def test_create_job_allows_low_level_override_after_confirmation(self) -> None:
         with patch.object(
             server.client, "create_job", return_value={"job_id": "job-low-level"}
         ) as create_job:
             result = server.ppt_create_job(
-                pdf_path="/tmp/demo.pdf",
+                pdf_path=str(self.demo_pdf),
                 options={"parse_provider": "local"},
                 low_level_override_confirmed=True,
             )
@@ -490,7 +550,7 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["job"]["job_id"], "job-low-level")
         create_job.assert_called_once_with(
-            pdf_path="/tmp/demo.pdf",
+            pdf_path=str(self.demo_pdf.resolve()),
             options={"parse_provider": "local"},
         )
 

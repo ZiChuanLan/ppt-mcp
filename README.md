@@ -261,7 +261,9 @@ uv run ppt-mcp-remote
 - AI 只能列出路线让用户选，不能自己根据 PDF 内容、版式、是否像扫描件之类的信息替用户选路线
 - AI 不应该说“我将为您选择最适合的路线”
 - 用户没有明确确认 route 之前，不应该调用 `ppt_check_route`、`ppt_set_conversion_target`、`ppt_set_route_options`、`ppt_list_route_models`、`ppt_convert_pdf`
+- `pdf_path` 必须是用户明确提供、并且在 `ppt-mcp` 当前运行环境里真实存在的本地 PDF 路径；不要编造示例路径、测试路径或占位路径
 - 如果用户一开始已经给了 `pdf_path` 或页码范围，应该尽早写进同一个 `route_workflow_id`；页数必须明确写成 `page_range_decision=all_pages` 或 `page_range_decision=page_range`，不要只靠对话记忆记住“第几页到第几页”
+- 在 `pdf_path` 和页码范围还没确认完之前，不应该先跳去 `ppt_list_route_models` 或 `ppt_set_route_options`
 - 用户问可用模型时，AI 必须先调用模型列表工具，并且只能复述工具真实返回的模型 id；不要脑补供应商分类、模型家族或推荐语
 - 如果是从 `model_choices` 里选模型，高层流程优先使用 `ocr_ai_model_choice_index`，不要让低端模型自己重打一长串 model id
 - 高层 route 流程里不要再向用户索要 API key；路线凭据默认从 `ppt-mcp` 的环境变量复用

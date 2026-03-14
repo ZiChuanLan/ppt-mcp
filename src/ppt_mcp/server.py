@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
 
-from ppt_mcp.api_client import PptApiClient, PptApiError
+from ppt_mcp.api_client import PptApiClient, PptApiError, _normalize_local_pdf_path
 from ppt_mcp.route_config import (
     RouteConfigError,
     get_route_definition,
@@ -35,10 +35,12 @@ mcp = FastMCP(
         "6) for AI OCR routes only, call `ppt_list_route_models` with the same `route_workflow_id`, then ask whether to keep the route default model or use a fetched model explicitly. "
         "If the user picks a model from `ppt_list_route_models`, reuse the locked route workflow's provider/base URL/API key by default. "
         "Prefer `ocr_ai_model_choice_index` over retyping a long `ocr_ai_model` string when the user selects from `model_choices`. "
+        "Never invent a local `pdf_path`, sample file, or placeholder path. Only use a file path the user explicitly provided. "
         "The high-level route tools do not support gateway switching. Do not ask the user for another API key, provider, or base URL in the guided flow. "
         "If the user explicitly wants to switch gateways, stop the guided flow and use low-level expert tools instead. "
         "When the user asks for available models, never answer from memory: call `ppt_list_route_models` (preferred) or `ppt_list_ai_models`, "
         "then repeat only the exact returned model IDs. Do not invent provider buckets, categories, or recommendations that the tool did not return. "
+        "If an earlier step is still missing, do not skip ahead to later tools. "
         "Never say you will choose the best route for the user. If the user only asks to convert a page range, first show the available routes and ask the user to pick one. "
         "Do not silently choose `segmented`, and prefer `ppt_convert_pdf` over `ppt_create_job` for normal use. "
         "Use local file paths for PDFs, then poll job status until completion."
@@ -331,6 +333,54 @@ def _normalize_pdf_path(pdf_path: str | None) -> str | None:
     return cleaned
 
 
+def _resolve_existing_local_pdf_path(
+    pdf_path: str | None,
+    *,
+    next_tool: str = "ppt_set_conversion_target",
+) -> str | None:
+    cleaned = _normalize_pdf_path(pdf_path)
+    if cleaned is None:
+        return None
+    normalized_path = _normalize_local_pdf_path(cleaned).expanduser().resolve()
+    if not normalized_path.exists():
+        raise RouteConfigError(
+            code="pdf_path_not_found",
+            message=(
+                "pdf_path does not exist on the MCP host; only use a real local "
+                "PDF path explicitly provided by the user"
+            ),
+            details={
+                "submitted_pdf_path": cleaned,
+                "normalized_pdf_path": str(normalized_path),
+                "next_field": "pdf_path",
+                "next_tool": next_tool,
+            },
+        )
+    if not normalized_path.is_file():
+        raise RouteConfigError(
+            code="invalid_pdf_path",
+            message="pdf_path must point to a file, not a directory",
+            details={
+                "submitted_pdf_path": cleaned,
+                "normalized_pdf_path": str(normalized_path),
+                "next_field": "pdf_path",
+                "next_tool": next_tool,
+            },
+        )
+    if normalized_path.suffix.lower() != ".pdf":
+        raise RouteConfigError(
+            code="invalid_pdf_path",
+            message="Only .pdf files are supported for pdf_path",
+            details={
+                "submitted_pdf_path": cleaned,
+                "normalized_pdf_path": str(normalized_path),
+                "next_field": "pdf_path",
+                "next_tool": next_tool,
+            },
+        )
+    return str(normalized_path)
+
+
 def _normalize_page_value(field_name: str, value: int | None) -> int | None:
     if value is None:
         return None
@@ -467,7 +517,7 @@ def _update_route_workflow(
     ocr_ai_model: str | None = None,
 ) -> None:
     if pdf_path is not None:
-        state.pdf_path = _normalize_pdf_path(pdf_path)
+        state.pdf_path = _resolve_existing_local_pdf_path(pdf_path)
     if page_range_decision is not None:
         state.page_range_decision = page_range_decision
         if page_range_decision == "all_pages":
@@ -572,6 +622,20 @@ def _preview_route_workflow(
 
 
 def _build_route_workflow_payload(state: RouteWorkflowState) -> dict[str, Any]:
+    decision_status = _build_decision_status(
+        route_selected=True,
+        route_title=state.title,
+        route_confirmed=True,
+        pdf_path=state.pdf_path,
+        page_range_decision=state.page_range_decision,
+        page_start=state.page_start,
+        page_end=state.page_end,
+        ai_route=state.ai_route,
+        scanned_page_mode=state.scanned_page_mode,
+        remove_footer_notebooklm=state.remove_footer_notebooklm,
+        ocr_ai_model_decision=state.ocr_ai_model_decision,
+        ocr_ai_model=state.ocr_ai_model,
+    )
     return {
         "workflow_id": state.workflow_id,
         "locked": True,
@@ -606,6 +670,13 @@ def _build_route_workflow_payload(state: RouteWorkflowState) -> dict[str, Any]:
             "capability": state.last_model_listing_capability,
             "model_count": len(state.last_listed_models),
         },
+        "next_required_step": {
+            "ready_for_submit": decision_status["ready_for_submit"],
+            "missing_fields": decision_status["missing_fields"],
+            "next_field": decision_status.get("next_field"),
+            "next_tool": decision_status.get("next_tool"),
+            "step_lock_active": bool(decision_status["missing_fields"]),
+        },
         "created_at_unix": int(state.created_at),
         "updated_at_unix": int(state.updated_at),
     }
@@ -629,6 +700,73 @@ def _build_current_decisions(state: RouteWorkflowState) -> dict[str, Any]:
         "ocr_ai_model_choice_index": state.ocr_ai_model_choice_index,
         "ocr_ai_model": state.ocr_ai_model,
     }
+
+
+def _missing_conversion_target_decisions(
+    *,
+    pdf_path: str | None,
+    page_range_decision: Literal["all_pages", "page_range"] | None,
+    page_start: int | None,
+    page_end: int | None,
+) -> list[str]:
+    missing: list[str] = []
+    if not str(pdf_path or "").strip():
+        missing.append("pdf_path")
+    if page_range_decision is None:
+        missing.append("page_range_decision")
+    elif page_range_decision == "page_range":
+        if page_start is None:
+            missing.append("page_start")
+        if page_end is None:
+            missing.append("page_end")
+    return missing
+
+
+def _require_conversion_target_step(
+    *,
+    state: RouteWorkflowState,
+    requested_tool: str,
+) -> None:
+    blocking_fields = _missing_conversion_target_decisions(
+        pdf_path=state.pdf_path,
+        page_range_decision=state.page_range_decision,
+        page_start=state.page_start,
+        page_end=state.page_end,
+    )
+    if not blocking_fields:
+        return
+    status = _build_decision_status(
+        route_selected=True,
+        route_title=state.title,
+        route_confirmed=True,
+        pdf_path=state.pdf_path,
+        page_range_decision=state.page_range_decision,
+        page_start=state.page_start,
+        page_end=state.page_end,
+        ai_route=state.ai_route,
+        scanned_page_mode=state.scanned_page_mode,
+        remove_footer_notebooklm=state.remove_footer_notebooklm,
+        ocr_ai_model_decision=state.ocr_ai_model_decision,
+        ocr_ai_model=state.ocr_ai_model,
+    )
+    raise RouteConfigError(
+        code="workflow_step_out_of_order",
+        message=(
+            f"{requested_tool} requires pdf_path and page range to be confirmed "
+            "first on the current route_workflow_id"
+        ),
+        details={
+            "route_workflow_id": state.workflow_id,
+            "requested_tool": requested_tool,
+            "step_lock": True,
+            "step_lock_reason": "confirm_conversion_target_first",
+            "blocking_fields": blocking_fields,
+            "next_field": status.get("next_field", "pdf_path"),
+            "next_tool": "ppt_set_conversion_target",
+            "next_question": status.get("next_question"),
+            "workflow_guidance": status.get("workflow_guidance"),
+        },
+    )
 
 
 def _resolve_model_choice_from_index(
@@ -725,15 +863,18 @@ def _build_workflow_guidance(
                 "scanned_page_mode": "fullpage",
                 "remove_footer_notebooklm": False,
             },
+            "defaults_require_explicit_user_acceptance": True,
             "hard_rules": [
                 "不要自己替用户选择路线。",
                 "不要根据 PDF 内容、版式或主观判断推断路线。",
                 "不要说“我来为你选择最适合的路线”。",
+                "不要编造 `pdf_path`；只能使用用户明确提供的真实本地 PDF 路径。",
                 "一旦 `ppt_check_route` 返回 `route_workflow_id`，后续高层 route 工具必须沿用同一个 workflow，不要把不同路线串起来。",
                 "高层 route 流程里不要再向用户索要 API key；路线凭据默认由 MCP 环境变量复用。",
                 "高层 route 工具不支持切换 provider / base_url；如需切网关，停止引导流程并改用低层工具。",
                 "列模型时只复述工具返回的原始 model id，不要脑补供应商分类、模型家族或推荐语。",
                 "一次只问一个问题，等用户回答后再继续。",
+                "如果 `next_tool` 仍然指向上一步，就不要跳到后面的工具。",
             ],
             "steps": steps,
         }
@@ -750,7 +891,7 @@ def _build_workflow_guidance(
         [
             {
                 "field": "pdf_path",
-                "question": "再确认本地 PDF 路径；如果用户一开始已经给了路径，就尽早写进当前 `route_workflow_id`，不要把文件路径只留在对话记忆里。",
+                "question": "再确认本地 PDF 路径；如果用户一开始已经给了路径，就尽早写进当前 `route_workflow_id`，不要把文件路径只留在对话记忆里。`pdf_path` 必须来自用户明确提供的真实本地路径，不要自己编示例路径、测试路径或占位路径。",
                 "tool": "ppt_set_conversion_target",
             },
             {
@@ -816,15 +957,18 @@ def _build_workflow_guidance(
             "scanned_page_mode": "fullpage",
             "remove_footer_notebooklm": False,
         },
+        "defaults_require_explicit_user_acceptance": True,
         "hard_rules": [
             "不要自己替用户选择路线。",
             "不要根据 PDF 内容、版式或主观判断推断路线。",
             "不要说“我来为你选择最适合的路线”。",
+            "不要编造 `pdf_path`；只能使用用户明确提供的真实本地 PDF 路径。",
             "一旦 `ppt_check_route` 返回 `route_workflow_id`，后续高层 route 工具必须沿用同一个 workflow，不要把不同路线串起来。",
             "高层 route 流程里不要再向用户索要 API key；路线凭据默认由 MCP 环境变量复用。",
             "高层 route 工具不支持切换 provider / base_url；如需切网关，停止引导流程并改用低层工具。",
             "列模型时只复述工具返回的原始 model id，不要脑补供应商分类、模型家族或推荐语。",
             "一次只问一个问题，等用户回答后再继续。",
+            "如果 `next_tool` 仍然指向上一步，就不要跳到后面的工具。",
         ],
         "steps": steps,
     }
@@ -946,15 +1090,14 @@ def _missing_submit_decisions(
     if not _route_confirmation_value(route_confirmed):
         missing.append("route_confirmed")
         return missing
-    if not str(pdf_path or "").strip():
-        missing.append("pdf_path")
-    if page_range_decision is None:
-        missing.append("page_range_decision")
-    elif page_range_decision == "page_range":
-        if page_start is None:
-            missing.append("page_start")
-        if page_end is None:
-            missing.append("page_end")
+    missing.extend(
+        _missing_conversion_target_decisions(
+            pdf_path=pdf_path,
+            page_range_decision=page_range_decision,
+            page_start=page_start,
+            page_end=page_end,
+        )
+    )
     if scanned_page_mode is None:
         missing.append("scanned_page_mode")
     if remove_footer_notebooklm is None:
@@ -1311,7 +1454,8 @@ def ppt_set_conversion_target(
 
     This is step 2 of the high-level guided flow. Use it to persist conversion
     target state so weaker models do not have to remember page ranges from chat
-    history.
+    history. `pdf_path` must be a real local PDF path explicitly provided by
+    the user.
     """
     try:
         normalized_page_range_decision = _normalize_page_range_decision(
@@ -1368,11 +1512,16 @@ def ppt_set_route_options(
     """Write scanned-page, footer, and AI model decisions into the workflow.
 
     This is step 3 of the high-level guided flow. Use `ppt_list_route_models`
-    first when the user wants to select a non-default AI OCR model.
+    first when the user wants to select a non-default AI OCR model. Do not use
+    this tool before `pdf_path` and page range are confirmed.
     """
     try:
         normalized_model_decision = _normalize_ai_model_decision(ocr_ai_model_decision)
         state = _get_route_workflow(route_workflow_id)
+        _require_conversion_target_step(
+            state=state,
+            requested_tool="ppt_set_route_options",
+        )
         _update_route_workflow(
             state=state,
             scanned_page_mode=scanned_page_mode,
@@ -1434,10 +1583,11 @@ def ppt_convert_pdf(
             ocr_ai_model_decision=state.ocr_ai_model_decision,
             ocr_ai_model=state.ocr_ai_model,
         )
+        normalized_pdf_path = _resolve_existing_local_pdf_path(state.pdf_path)
         options, effective_config = _preview_route_workflow(state=state)
         options["retain_process_artifacts"] = retain_process_artifacts
         effective_config["retain_process_artifacts"] = retain_process_artifacts
-        payload = client.create_job(pdf_path=str(state.pdf_path), options=options)
+        payload = client.create_job(pdf_path=str(normalized_pdf_path), options=options)
         return {
             "ok": True,
             "route": state.route,
@@ -1498,10 +1648,12 @@ def ppt_conversion_intake(route: str | None = None) -> str:
         "高层 route 流程先用 `ppt_check_route` 锁定路线，再用 `ppt_set_conversion_target` 写 `pdf_path` 和页码范围，再用 `ppt_set_route_options` 写扫描页处理、页脚和模型选择，最后才用 `ppt_convert_pdf` 提交。",
         "拿到 `route_workflow_id` 后，后续继续沿用这个 workflow；不要把不同路线串到同一条流程里。",
         "如果用户一开始就给了 `pdf_path` 或页码范围，尽早在 `ppt_set_conversion_target` 里写进同一个 `route_workflow_id`，其中页码范围要明确写成 `page_range_decision`，不要只靠聊天记忆记住“第几页到第几页”。",
+        "`pdf_path` 只能使用用户明确提供的真实本地 PDF 路径；不要编造示例路径、测试路径或占位路径。",
         "高层 route 流程里，路线凭据默认从 MCP 环境变量复用；不要在用户选了路线或模型后再反问 API key。",
         "高层 route 工具不支持切换 provider / base_url；如需切网关，改用低层专家工具。",
         "用户问可用模型时，必须先调用模型列表工具，并且只复述工具返回的原始 model id；不要脑补供应商分类、模型家族或推荐语。",
         "低端模型优先使用 `ocr_ai_model_choice_index`，不要自己重打一长串 `ocr_ai_model`。",
+        "如果 `next_tool` 仍然指向上一步，就不要跳到后面的工具。",
         "建议回复示例：可用路线如下，请您先选一条；在您确认前我不会替您决定。",
     ]
     if route_title:
@@ -1546,7 +1698,9 @@ def ppt_create_job(
     `ppt_convert_pdf`.
 
     Never use this tool unless the user explicitly asks to bypass the guided
-    route workflow and confirms `low_level_override_confirmed=true`.
+    route workflow and confirms `low_level_override_confirmed=true`. The
+    `pdf_path` must be a real existing local PDF path explicitly provided by
+    the user.
     """
     try:
         if not _low_level_override_value(low_level_override_confirmed):
@@ -1574,7 +1728,11 @@ def ppt_create_job(
                     "low_level_escape_hatch": _build_low_level_escape_hatch_policy(),
                 },
             )
-        payload = client.create_job(pdf_path=pdf_path, options=options)
+        normalized_pdf_path = _resolve_existing_local_pdf_path(
+            pdf_path,
+            next_tool="ppt_create_job",
+        )
+        payload = client.create_job(pdf_path=str(normalized_pdf_path), options=options)
         return {
             "ok": True,
             "job": payload,
@@ -1656,9 +1814,17 @@ def ppt_download_artifact(
 def ppt_list_route_models(
     route_workflow_id: str,
 ) -> dict[str, Any]:
-    """List candidate models for the currently locked high-level route workflow."""
+    """List candidate models for the currently locked high-level route workflow.
+
+    Only use this after `pdf_path` and page range are already confirmed on the
+    same route_workflow_id.
+    """
     try:
         state = _get_route_workflow(route_workflow_id)
+        _require_conversion_target_step(
+            state=state,
+            requested_tool="ppt_list_route_models",
+        )
         if not state.ai_route:
             raise RouteConfigError(
                 code="invalid_route_model_listing",
