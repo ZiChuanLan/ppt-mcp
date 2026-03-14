@@ -237,6 +237,7 @@ uv run ppt-mcp-remote
 - `ppt_get_job_artifacts`
 - `ppt_download_result`
 - `ppt_download_artifact`
+- `ppt_list_route_models`
 - `ppt_list_ai_models`
 - `ppt_check_ai_ocr`
 
@@ -250,24 +251,39 @@ uv run ppt-mcp-remote
 
 而不是一开始就手填所有底层 job fields。
 
+高层工作流有一条强规则：
+
+- AI 只能列出路线让用户选，不能自己根据 PDF 内容、版式、是否像扫描件之类的信息替用户选路线
+- AI 不应该说“我将为您选择最适合的路线”
+- 用户没有明确确认 route 之前，不应该调用 `ppt_check_route`、`ppt_list_route_models`、`ppt_convert_pdf`
+- `ppt_create_job` 也是低层 escape hatch；除非用户明确要求绕过引导流程，否则不应该直接调用
+
 ### 典型流程
 
 1. 用 `ppt_list_routes` 看有哪些可用路线
-2. 选一个路线，例如 `本地切块识别`、`MinerU 云解析`
-3. 继续按顺序确认：
+2. 先让用户明确选择并确认一个路线，例如 `本地切块识别`、`MinerU 云解析`
+3. route 级工具都要带上 `route_confirmed=true`
+4. 继续按顺序确认：
    `scanned_page_mode` 是 `fullpage` 还是 `segmented`
-4. 再确认是否要开 `remove_footer_notebooklm`
-5. 如果是 AI OCR 路线，再确认沿用默认模型还是显式指定 `ocr_ai_provider` / `ocr_ai_base_url` / `ocr_ai_model`
-6. 再用 `ppt_convert_pdf(pdf_path, route=...)` 提交任务
-7. 用 `ppt_get_job_status` 轮询进度
-8. 用 `ppt_download_result` 下载结果
+5. 再确认是否要开 `remove_footer_notebooklm`
+6. 如果是 AI OCR 路线，先调用 `ppt_list_route_models(route=..., route_confirmed=true)` 拉候选模型
+7. 再让用户明确选择：
+   `ocr_ai_model_decision=route_default`，或者
+   `ocr_ai_model_decision=explicit` 并填写选中的 `ocr_ai_model`
+8. 再用 `ppt_convert_pdf(pdf_path, route=..., route_confirmed=true)` 提交任务
+9. 用 `ppt_get_job_status` 轮询进度
+10. 用 `ppt_download_result` 下载结果
 
 默认建议：
 
 - `scanned_page_mode=fullpage`
 - `remove_footer_notebooklm=false`
 
-`ppt_convert_pdf` 现在会拒绝未确认完关键决策的提交；如果还没明确 `scanned_page_mode` 和 `remove_footer_notebooklm`，它会返回缺失字段和下一步该问什么，而不是静默套默认值直接开跑。
+`ppt_check_route`、`ppt_list_route_models` 和 `ppt_convert_pdf` 现在都会拒绝未确认 route 的调用；如果还没明确 `route_confirmed=true`，它们会直接返回缺失字段和下一步该问什么，而不是让 AI 自己先选路线再继续。
+
+`ppt_convert_pdf` 还会继续拒绝未确认完其他关键决策的提交；如果还没明确 `scanned_page_mode`、`remove_footer_notebooklm`，或者 AI 路线还没明确 `ocr_ai_model_decision`，它会返回缺失字段和下一步该问什么，而不是静默套默认值直接开跑。
+
+`ppt_create_job` 现在也要求显式传 `low_level_override_confirmed=true`；如果用户只是说“转第 3 页”，不应该直接走这个低层工具。
 
 路径说明：
 
@@ -374,13 +390,38 @@ uv run ppt-mcp-remote
 如果是高层工具 `ppt_convert_pdf`，优先直接传这些显式参数，而不是把它们塞进 `extra_options`：
 
 - `route`
+- `route_confirmed`
 - `scanned_page_mode`
 - `remove_footer_notebooklm`
+- `ocr_ai_model_decision`
 - `ocr_ai_provider`
 - `ocr_ai_base_url`
 - `ocr_ai_model`
 
+如果你确实要走低层 `ppt_create_job`，还必须显式传：
+
+- `low_level_override_confirmed=true`
+  表示用户明确要求绕过高层引导，愿意自己承担底层参数选择
+
+AI OCR 路线的模型决策现在必须显式确认：
+
+- `ocr_ai_model_decision=route_default`
+  表示用户明确接受 route 默认模型
+- `ocr_ai_model_decision=explicit`
+  表示用户已经从 `ppt_list_route_models` 返回的列表里选了一个模型，并会显式填写 `ocr_ai_model`
+
 ### 列模型
+
+高层 AI OCR 工作流优先用 `ppt_list_route_models`，它会自动使用 route 对应的 provider / base URL / API key，并返回 route 默认模型和候选列表。
+
+```json
+{
+  "route": "模型直出框和文字",
+  "route_confirmed": true
+}
+```
+
+如果你就是想手动探测任意 provider，也可以继续用底层 `ppt_list_ai_models`：
 
 ```json
 {

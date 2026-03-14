@@ -165,8 +165,8 @@ def list_routes() -> list[dict[str, Any]]:
     return items
 
 
-def resolve_route(route: str) -> ResolvedRoute:
-    """Resolve a simplified route into concrete job options."""
+def get_route_definition(route: str) -> RouteDefinition:
+    """Return public route metadata without requiring env expansion."""
     key = str(route or "").strip()
     definition = _ROUTE_BY_KEY.get(key)
     if definition is None:
@@ -178,6 +178,12 @@ def resolve_route(route: str) -> ResolvedRoute:
                 "available_routes": [item.route for item in ROUTES],
             },
         )
+    return definition
+
+
+def resolve_route(route: str) -> ResolvedRoute:
+    """Resolve a simplified route into concrete job options."""
+    definition = get_route_definition(route)
 
     if definition.route == "local_basic":
         return ResolvedRoute(
