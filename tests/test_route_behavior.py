@@ -133,6 +133,7 @@ class RouteBehaviorTests(unittest.TestCase):
                 "ppt_convert_pdf",
             ],
         )
+        self.assertNotIn("page_range_decision", result["workflow_guidance"]["defaults"])
         routes = result["routes"]
         layout_block = next(item for item in routes if item["route"] == "layout_block")
         self.assertEqual(layout_block["display_name"], "本地切块识别")
@@ -165,7 +166,7 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertEqual(result["next_field"], "pdf_path")
         self.assertEqual(result["next_tool"], "ppt_set_conversion_target")
         self.assertTrue(result["route_workflow"]["locked"])
-        self.assertEqual(result["current_decisions"]["page_range_label"], "all_pages")
+        self.assertEqual(result["current_decisions"]["page_range_label"], "pending")
         steps = result["workflow_guidance"]["steps"]
         self.assertEqual(steps[0]["field"], "route_confirmed")
         self.assertEqual(steps[1]["tool"], "ppt_set_conversion_target")
@@ -455,6 +456,7 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertIn("ppt_set_conversion_target", prompt)
         self.assertIn("ppt_set_route_options", prompt)
         self.assertIn("page_range_decision", prompt)
+        self.assertIn("不要静默默认成整份 PDF", prompt)
         self.assertIn("ocr_ai_model_choice_index", prompt)
         self.assertIn("route_workflow_id", prompt)
 

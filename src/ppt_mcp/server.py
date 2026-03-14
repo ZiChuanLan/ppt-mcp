@@ -419,7 +419,7 @@ def _page_range_label(
             return f"{page_start}-{page_end}"
         return "page_range_pending"
     if page_start is None and page_end is None:
-        return "all_pages"
+        return "pending"
     if page_start is not None and page_end is not None:
         return f"{page_start}-{page_end}"
     if page_start is not None:
@@ -859,7 +859,6 @@ def _build_workflow_guidance(
         return {
             "ask_one_by_one": True,
             "defaults": {
-                "page_range_decision": "all_pages",
                 "scanned_page_mode": "fullpage",
                 "remove_footer_notebooklm": False,
             },
@@ -869,6 +868,7 @@ def _build_workflow_guidance(
                 "不要根据 PDF 内容、版式或主观判断推断路线。",
                 "不要说“我来为你选择最适合的路线”。",
                 "不要编造 `pdf_path`；只能使用用户明确提供的真实本地 PDF 路径。",
+                "`page_range_decision` 必须显式确认；不要静默默认成 `all_pages`。",
                 "一旦 `ppt_check_route` 返回 `route_workflow_id`，后续高层 route 工具必须沿用同一个 workflow，不要把不同路线串起来。",
                 "高层 route 流程里不要再向用户索要 API key；路线凭据默认由 MCP 环境变量复用。",
                 "高层 route 工具不支持切换 provider / base_url；如需切网关，停止引导流程并改用低层工具。",
@@ -896,7 +896,7 @@ def _build_workflow_guidance(
             },
             {
                 "field": "page_range_decision",
-                "question": "再明确确认页码范围决策：`all_pages`（整份 PDF）还是 `page_range`（指定页码范围）。这一步必须明确，不要跳过。",
+                "question": "再明确确认要转换哪些页：`all_pages`（整份 PDF）还是 `page_range`（指定页码范围）。这一步必须明确，不要跳过，也不要静默默认成整份。",
                 "recommended": "all_pages",
                 "tool": "ppt_set_conversion_target",
             },
@@ -953,7 +953,6 @@ def _build_workflow_guidance(
     return {
         "ask_one_by_one": True,
         "defaults": {
-            "page_range_decision": "all_pages",
             "scanned_page_mode": "fullpage",
             "remove_footer_notebooklm": False,
         },
@@ -963,6 +962,7 @@ def _build_workflow_guidance(
             "不要根据 PDF 内容、版式或主观判断推断路线。",
             "不要说“我来为你选择最适合的路线”。",
             "不要编造 `pdf_path`；只能使用用户明确提供的真实本地 PDF 路径。",
+            "`page_range_decision` 必须显式确认；不要静默默认成 `all_pages`。",
             "一旦 `ppt_check_route` 返回 `route_workflow_id`，后续高层 route 工具必须沿用同一个 workflow，不要把不同路线串起来。",
             "高层 route 流程里不要再向用户索要 API key；路线凭据默认由 MCP 环境变量复用。",
             "高层 route 工具不支持切换 provider / base_url；如需切网关，停止引导流程并改用低层工具。",
@@ -1648,6 +1648,7 @@ def ppt_conversion_intake(route: str | None = None) -> str:
         "高层 route 流程先用 `ppt_check_route` 锁定路线，再用 `ppt_set_conversion_target` 写 `pdf_path` 和页码范围，再用 `ppt_set_route_options` 写扫描页处理、页脚和模型选择，最后才用 `ppt_convert_pdf` 提交。",
         "拿到 `route_workflow_id` 后，后续继续沿用这个 workflow；不要把不同路线串到同一条流程里。",
         "如果用户一开始就给了 `pdf_path` 或页码范围，尽早在 `ppt_set_conversion_target` 里写进同一个 `route_workflow_id`，其中页码范围要明确写成 `page_range_decision`，不要只靠聊天记忆记住“第几页到第几页”。",
+        "`page_range_decision` 必须显式确认；不要静默默认成整份 PDF。",
         "`pdf_path` 只能使用用户明确提供的真实本地 PDF 路径；不要编造示例路径、测试路径或占位路径。",
         "高层 route 流程里，路线凭据默认从 MCP 环境变量复用；不要在用户选了路线或模型后再反问 API key。",
         "高层 route 工具不支持切换 provider / base_url；如需切网关，改用低层专家工具。",
