@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -32,6 +33,17 @@ class ApiClientPathTests(unittest.TestCase):
         )
 
         self.assertEqual(path, Path("/home/lan/workspace/demo.pdf"))
+
+    def test_normalize_local_pdf_path_keeps_windows_path_on_native_windows(self) -> None:
+        with patch.object(api_client.os, "name", "nt"):
+            path = api_client._normalize_local_pdf_path(
+                r"C:\Users\27783\Desktop\+AI智能体开发大学生指南.pdf"
+            )
+
+        self.assertEqual(
+            str(path),
+            r"C:\Users\27783\Desktop\+AI智能体开发大学生指南.pdf",
+        )
 
 
 if __name__ == "__main__":

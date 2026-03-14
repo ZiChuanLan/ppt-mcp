@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,9 @@ def _serialize_form_value(value: Any) -> str:
 def _normalize_local_pdf_path(pdf_path: str) -> Path:
     raw = str(pdf_path or "").strip()
     if not raw:
+        return Path(raw)
+
+    if os.name == "nt":
         return Path(raw)
 
     windows_match = _WINDOWS_DRIVE_PATH_RE.match(raw)
