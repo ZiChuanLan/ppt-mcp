@@ -267,6 +267,11 @@ uv run ppt-mcp-remote
 - `scanned_page_mode=fullpage`
 - `remove_footer_notebooklm=false`
 
+路径说明：
+
+- 如果 `ppt-mcp` 跑在 WSL，而 MCP 客户端给的是 Windows 路径，例如 `C:\Users\27783\Desktop\file.pdf`，本地 stdio 模式现在会自动转换成 `/mnt/c/Users/27783/Desktop/file.pdf`
+- 如果客户端给的是 `\\wsl.localhost\发行版名\...`，也会自动转换成对应的 Linux 路径
+
 ## 常用路线
 
 - `基础本地解析` (`local_basic`)

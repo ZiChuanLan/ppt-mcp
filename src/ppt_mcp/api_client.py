@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,12 +30,38 @@ class PptApiError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"^(?P<drive>[A-Za-z]):[\\/](?P<rest>.*)$")
+_WSL_UNC_PATH_RE = re.compile(
+    r"^[\\/]{2}wsl\.localhost[\\/][^\\/]+[\\/](?P<rest>.*)$",
+    re.IGNORECASE,
+)
+
+
 def _serialize_form_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=True)
     return str(value)
+
+
+def _normalize_local_pdf_path(pdf_path: str) -> Path:
+    raw = str(pdf_path or "").strip()
+    if not raw:
+        return Path(raw)
+
+    windows_match = _WINDOWS_DRIVE_PATH_RE.match(raw)
+    if windows_match:
+        drive = windows_match.group("drive").lower()
+        rest = windows_match.group("rest").replace("\\", "/")
+        return Path(f"/mnt/{drive}/{rest}")
+
+    wsl_unc_match = _WSL_UNC_PATH_RE.match(raw)
+    if wsl_unc_match:
+        rest = wsl_unc_match.group("rest").replace("\\", "/")
+        return Path(f"/{rest.lstrip('/')}")
+
+    return Path(raw)
 
 
 class PptApiClient:
@@ -164,7 +191,7 @@ class PptApiClient:
         pdf_path: str,
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        path = Path(pdf_path).expanduser().resolve()
+        path = _normalize_local_pdf_path(pdf_path).expanduser().resolve()
         if not path.exists():
             raise FileNotFoundError(f"PDF not found: {path}")
         if not path.is_file():
