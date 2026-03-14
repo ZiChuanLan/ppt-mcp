@@ -73,6 +73,8 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertEqual(result["effective_config"]["ocr_ai_model"], "gpt-4.1-mini")
         self.assertEqual(result["effective_config"]["ocr_ai_provider"], "openai")
         self.assertTrue(result["effective_config"]["enable_ocr"])
+        self.assertEqual(result["effective_config"]["scanned_page_mode"], "fullpage")
+        self.assertFalse(result["effective_config"]["remove_footer_notebooklm"])
 
         create_job.assert_called_once()
         create_options = create_job.call_args.kwargs["options"]
@@ -81,6 +83,27 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertEqual(create_options["ocr_ai_base_url"], "https://example.com/v1")
         self.assertEqual(create_options["ocr_ai_prompt_preset"], "custom_preset")
         self.assertTrue(create_options["enable_ocr"])
+        self.assertEqual(create_options["scanned_page_mode"], "fullpage")
+        self.assertFalse(create_options["remove_footer_notebooklm"])
+
+    def test_convert_pdf_applies_explicit_scanned_page_and_footer_overrides(self) -> None:
+        with patch.object(
+            server.client, "create_job", return_value={"job_id": "job-456"}
+        ) as create_job:
+            result = server.ppt_convert_pdf(
+                pdf_path="/tmp/demo.pdf",
+                route="本地切块识别",
+                scanned_page_mode="segmented",
+                remove_footer_notebooklm=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["effective_config"]["scanned_page_mode"], "segmented")
+        self.assertTrue(result["effective_config"]["remove_footer_notebooklm"])
+
+        create_options = create_job.call_args.kwargs["options"]
+        self.assertEqual(create_options["scanned_page_mode"], "segmented")
+        self.assertTrue(create_options["remove_footer_notebooklm"])
 
     def test_check_route_rejects_ai_overrides_for_non_ai_route(self) -> None:
         result = server.ppt_check_route(
@@ -89,6 +112,15 @@ class RouteBehaviorTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "invalid_override")
+
+    def test_check_route_returns_ordered_workflow_guidance(self) -> None:
+        result = server.ppt_check_route(route="本地切块识别")
+
+        self.assertTrue(result["ok"])
+        steps = result["workflow_guidance"]["steps"]
+        self.assertEqual(steps[0]["field"], "scanned_page_mode")
+        self.assertEqual(steps[1]["field"], "remove_footer_notebooklm")
+        self.assertEqual(steps[2]["field"], "ocr_ai_model")
 
 
 if __name__ == "__main__":

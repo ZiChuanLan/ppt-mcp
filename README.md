@@ -254,9 +254,18 @@ uv run ppt-mcp-remote
 
 1. 用 `ppt_list_routes` 看有哪些可用路线
 2. 选一个路线，例如 `本地切块识别`、`MinerU 云解析`
-3. 用 `ppt_convert_pdf(pdf_path, route=...)` 提交任务
-4. 用 `ppt_get_job_status` 轮询进度
-5. 用 `ppt_download_result` 下载结果
+3. 继续按顺序确认：
+   `scanned_page_mode` 是 `fullpage` 还是 `segmented`
+4. 再确认是否要开 `remove_footer_notebooklm`
+5. 如果是 AI OCR 路线，再确认沿用默认模型还是显式指定 `ocr_ai_provider` / `ocr_ai_base_url` / `ocr_ai_model`
+6. 再用 `ppt_convert_pdf(pdf_path, route=...)` 提交任务
+7. 用 `ppt_get_job_status` 轮询进度
+8. 用 `ppt_download_result` 下载结果
+
+默认建议：
+
+- `scanned_page_mode=fullpage`
+- `remove_footer_notebooklm=false`
 
 ## 常用路线
 
@@ -354,6 +363,15 @@ uv run ppt-mcp-remote
   "retain_process_artifacts": true
 }
 ```
+
+如果是高层工具 `ppt_convert_pdf`，优先直接传这些显式参数，而不是把它们塞进 `extra_options`：
+
+- `route`
+- `scanned_page_mode`
+- `remove_footer_notebooklm`
+- `ocr_ai_provider`
+- `ocr_ai_base_url`
+- `ocr_ai_model`
 
 ### 列模型
 

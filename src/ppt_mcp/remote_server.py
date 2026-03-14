@@ -81,8 +81,10 @@ def create_remote_mcp(service: RemoteService) -> FastMCP:
     mcp = FastMCP(
         "ppt-remote",
         instructions=(
-            "Hosted PDF-to-PPT MCP service. Create or reference a source, choose a "
-            "pipeline_id and profile_id, then poll the resulting job."
+            "Hosted PDF-to-PPT MCP service. Ask for missing inputs one by one before creating a job: "
+            "1) choose pipeline_id, 2) choose scanned-page image handling (`fullpage` recommended), "
+            "3) decide whether NotebookLM footer removal is needed, 4) choose profile_id and any model/profile overrides. "
+            "Then create or reference a source and poll the resulting job."
         ),
         stateless_http=True,
         json_response=True,
