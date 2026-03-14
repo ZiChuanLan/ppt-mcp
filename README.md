@@ -228,6 +228,8 @@ uv run ppt-mcp-remote
 
 - `ppt_list_routes`
 - `ppt_check_route`
+- `ppt_set_conversion_target`
+- `ppt_set_route_options`
 - `ppt_convert_pdf`
 - `ppt_health_check`
 - `ppt_create_job`
@@ -247,6 +249,9 @@ uv run ppt-mcp-remote
 
 - `ppt_list_routes`
 - `ppt_check_route`
+- `ppt_set_conversion_target`
+- `ppt_list_route_models`（仅 AI OCR 路线需要）
+- `ppt_set_route_options`
 - `ppt_convert_pdf`
 
 而不是一开始就手填所有底层 job fields。
@@ -255,33 +260,45 @@ uv run ppt-mcp-remote
 
 - AI 只能列出路线让用户选，不能自己根据 PDF 内容、版式、是否像扫描件之类的信息替用户选路线
 - AI 不应该说“我将为您选择最适合的路线”
-- 用户没有明确确认 route 之前，不应该调用 `ppt_check_route`、`ppt_list_route_models`、`ppt_convert_pdf`
+- 用户没有明确确认 route 之前，不应该调用 `ppt_check_route`、`ppt_set_conversion_target`、`ppt_set_route_options`、`ppt_list_route_models`、`ppt_convert_pdf`
+- 如果用户一开始已经给了 `pdf_path` 或页码范围，应该尽早写进同一个 `route_workflow_id`；页数必须明确写成 `page_range_decision=all_pages` 或 `page_range_decision=page_range`，不要只靠对话记忆记住“第几页到第几页”
+- 用户问可用模型时，AI 必须先调用模型列表工具，并且只能复述工具真实返回的模型 id；不要脑补供应商分类、模型家族或推荐语
+- 如果是从 `model_choices` 里选模型，高层流程优先使用 `ocr_ai_model_choice_index`，不要让低端模型自己重打一长串 model id
+- 高层 route 流程里不要再向用户索要 API key；路线凭据默认从 `ppt-mcp` 的环境变量复用
+- 高层 route 工具不支持切换 provider / base URL；如需切网关，改用低层 `ppt_list_ai_models` / `ppt_check_ai_ocr` / `ppt_create_job`
 - `ppt_create_job` 也是低层 escape hatch；除非用户明确要求绕过引导流程，否则不应该直接调用
 
 ### 典型流程
 
 1. 用 `ppt_list_routes` 看有哪些可用路线
 2. 先让用户明确选择并确认一个路线，例如 `本地切块识别`、`MinerU 云解析`
-3. route 级工具都要带上 `route_confirmed=true`
-4. 继续按顺序确认：
-   `scanned_page_mode` 是 `fullpage` 还是 `segmented`
-5. 再确认是否要开 `remove_footer_notebooklm`
-6. 如果是 AI OCR 路线，先调用 `ppt_list_route_models(route=..., route_confirmed=true)` 拉候选模型
-7. 再让用户明确选择：
+3. 用 `ppt_check_route(route=..., route_confirmed=true)` 锁定这条路线，并拿到返回的 `route_workflow_id`
+4. 用 `ppt_set_conversion_target(route_workflow_id=..., pdf_path=...)` 写入本地 PDF 路径
+5. 在同一个 `ppt_set_conversion_target(...)` 里明确写入页码范围决策：
+   `page_range_decision=all_pages`，或者
+   `page_range_decision=page_range` 并继续填写 `page_start`、`page_end`
+6. 后续高层 route 工具都继续沿用同一个 `route_workflow_id`，不要把不同路线串到同一条流程里
+7. 用 `ppt_set_route_options(route_workflow_id=..., scanned_page_mode=..., remove_footer_notebooklm=...)` 写扫描页处理和页脚选项
+8. 如果是 AI OCR 路线，先调用 `ppt_list_route_models(route_workflow_id=...)` 拉候选模型
+   只复述工具真实返回的模型 id，不要自己补充“本地模型 / Groq / OpenAI / Anthropic”之类的分类
+9. 再用 `ppt_set_route_options(...)` 让用户明确选择：
    `ocr_ai_model_decision=route_default`，或者
-   `ocr_ai_model_decision=explicit` 并填写选中的 `ocr_ai_model`
-8. 再用 `ppt_convert_pdf(pdf_path, route=..., route_confirmed=true)` 提交任务
-9. 用 `ppt_get_job_status` 轮询进度
-10. 用 `ppt_download_result` 下载结果
+   `ocr_ai_model_decision=explicit` 并优先填写选中的 `ocr_ai_model_choice_index`
+   只有确实需要时再补 `ocr_ai_model`
+   如果只是同一路线下换模型，默认沿用该路线已有的 provider / base URL / API key，不应该再反问 API key
+   如果用户明确要切换 provider / base URL，就不要继续走高层 route 工具，改走低层 expert 工具
+10. 最后再用 `ppt_convert_pdf(route_workflow_id=...)` 提交任务
+11. 用 `ppt_get_job_status` 轮询进度
+12. 用 `ppt_download_result` 下载结果
 
 默认建议：
 
 - `scanned_page_mode=fullpage`
 - `remove_footer_notebooklm=false`
 
-`ppt_check_route`、`ppt_list_route_models` 和 `ppt_convert_pdf` 现在都会拒绝未确认 route 的调用；如果还没明确 `route_confirmed=true`，它们会直接返回缺失字段和下一步该问什么，而不是让 AI 自己先选路线再继续。
+`ppt_check_route` 现在只负责锁 route；拿到 `route_workflow_id` 之后，高层流程应该继续走 `ppt_set_conversion_target`、`ppt_list_route_models`（如有需要）、`ppt_set_route_options`，最后才到 `ppt_convert_pdf`。
 
-`ppt_convert_pdf` 还会继续拒绝未确认完其他关键决策的提交；如果还没明确 `scanned_page_mode`、`remove_footer_notebooklm`，或者 AI 路线还没明确 `ocr_ai_model_decision`，它会返回缺失字段和下一步该问什么，而不是静默套默认值直接开跑。
+`ppt_convert_pdf` 现在只负责提交；如果 `pdf_path`、`page_range_decision`、`scanned_page_mode`、`remove_footer_notebooklm`，或者 AI 路线下的模型选择还没在 workflow 里确认完，它会直接返回缺失字段、下一步字段和下一步工具，而不是静默套默认值直接开跑。
 
 `ppt_create_job` 现在也要求显式传 `low_level_override_confirmed=true`；如果用户只是说“转第 3 页”，不应该直接走这个低层工具。
 
@@ -372,7 +389,7 @@ uv run ppt-mcp-remote
 
 ## 常见参数示例
 
-### `ppt_convert_pdf` / `ppt_create_job`
+### `ppt_create_job`
 
 ```json
 {
@@ -387,16 +404,14 @@ uv run ppt-mcp-remote
 }
 ```
 
-如果是高层工具 `ppt_convert_pdf`，优先直接传这些显式参数，而不是把它们塞进 `extra_options`：
+高层 route 工具现在拆成四步：
 
-- `route`
-- `route_confirmed`
-- `scanned_page_mode`
-- `remove_footer_notebooklm`
-- `ocr_ai_model_decision`
-- `ocr_ai_provider`
-- `ocr_ai_base_url`
-- `ocr_ai_model`
+- `ppt_check_route(route, route_confirmed=true)`
+- `ppt_set_conversion_target(route_workflow_id, pdf_path, page_range_decision, page_start?, page_end?)`
+- `ppt_set_route_options(route_workflow_id, scanned_page_mode, remove_footer_notebooklm, ocr_ai_model_decision, ocr_ai_model_choice_index?, ocr_ai_model?)`
+- `ppt_convert_pdf(route_workflow_id, retain_process_artifacts?)`
+
+高层 route 工具不会暴露 `ocr_ai_provider`、`ocr_ai_base_url`、`ocr_ai_prompt_preset`、`extra_options`。如果需要切换网关或传更底层的高级参数，请改用 `ppt_create_job`。
 
 如果你确实要走低层 `ppt_create_job`，还必须显式传：
 
@@ -408,16 +423,19 @@ AI OCR 路线的模型决策现在必须显式确认：
 - `ocr_ai_model_decision=route_default`
   表示用户明确接受 route 默认模型
 - `ocr_ai_model_decision=explicit`
-  表示用户已经从 `ppt_list_route_models` 返回的列表里选了一个模型，并会显式填写 `ocr_ai_model`
+  表示用户已经从 `ppt_list_route_models` 返回的列表里选了一个模型
+  高层流程优先填写 `ocr_ai_model_choice_index`
+  只有确实需要时再补 `ocr_ai_model`
 
 ### 列模型
 
 高层 AI OCR 工作流优先用 `ppt_list_route_models`，它会自动使用 route 对应的 provider / base URL / API key，并返回 route 默认模型和候选列表。
 
+先通过 `ppt_check_route(...)` 锁定路线，拿到 `route_workflow_id`，再列模型：
+
 ```json
 {
-  "route": "模型直出框和文字",
-  "route_confirmed": true
+  "route_workflow_id": "your-route-workflow-id"
 }
 ```
 
@@ -428,9 +446,13 @@ AI OCR 路线的模型决策现在必须显式确认：
   "provider": "openai",
   "api_key": "sk-...",
   "base_url": "https://api.openai.com/v1",
-  "capability": "vision"
+  "capability": "ocr"
 }
 ```
+
+低层 `ppt_list_ai_models` 也只应该复述工具返回的原始模型 id；不要自己扩写成供应商分类、推荐列表或“以及更多选择”。
+
+如果用户明确要切换 provider / base URL，不要继续走高层 route 工具，改用低层 `ppt_list_ai_models` / `ppt_check_ai_ocr` / `ppt_create_job`。
 
 ### 检查 AI OCR 模型
 
@@ -451,7 +473,7 @@ AI OCR 路线的模型决策现在必须显式确认：
 - key: `PPT_LAYOUT_BLOCK_API_KEY` 或 `SILICONFLOW_API_KEY`
 - provider 默认：`siliconflow`
 - base URL 默认：`https://api.siliconflow.cn/v1`
-- model 默认：`Qwen/Qwen2.5-VL-72B-Instruct`
+- model 默认：`deepseek-ai/DeepSeek-OCR`
 
 ### `模型直出框和文字` / `direct`
 

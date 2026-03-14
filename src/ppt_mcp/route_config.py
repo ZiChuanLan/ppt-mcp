@@ -8,7 +8,7 @@ from typing import Any
 
 
 SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-DEFAULT_LAYOUT_BLOCK_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct"
+DEFAULT_LAYOUT_BLOCK_MODEL = "deepseek-ai/DeepSeek-OCR"
 DEFAULT_DIRECT_MODEL = "deepseek-ai/DeepSeek-OCR"
 DEFAULT_DOC_PARSER_MODEL = "PaddlePaddle/PaddleOCR-VL-1.5"
 
@@ -79,7 +79,7 @@ ROUTES: tuple[RouteDefinition, ...] = (
     RouteDefinition(
         route="layout_block",
         title="本地切块识别",
-        summary="先做本地版面切块，再逐块调用 AI OCR。适合 Qwen-VL 类模型。",
+        summary="先做本地版面切块，再逐块调用 AI OCR。默认使用 DeepSeek-OCR，也支持其他视觉/OCR 模型。",
         env_hints=("SILICONFLOW_API_KEY or PPT_LAYOUT_BLOCK_API_KEY",),
         aliases=("本地切块识别", "local.aiocr.layout_block"),
     ),
@@ -291,7 +291,7 @@ def resolve_route(route: str) -> ResolvedRoute:
         provider = _env("PPT_LAYOUT_BLOCK_PROVIDER") or "siliconflow"
         base_url = _env("PPT_LAYOUT_BLOCK_BASE_URL") or SILICONFLOW_BASE_URL
         model = _env("PPT_LAYOUT_BLOCK_MODEL") or DEFAULT_LAYOUT_BLOCK_MODEL
-        prompt_preset = _env("PPT_LAYOUT_BLOCK_PROMPT_PRESET") or "qwen_vl"
+        prompt_preset = _env("PPT_LAYOUT_BLOCK_PROMPT_PRESET") or "deepseek_ocr"
         options = {
             "parse_provider": "local",
             "enable_ocr": True,
