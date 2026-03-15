@@ -36,9 +36,11 @@ class RouteBehaviorTests(unittest.TestCase):
         self.demo_pdf = Path(self.temp_dir.name) / "demo.pdf"
         self.demo_pdf.write_bytes(b"%PDF-1.4\n%stub\n")
         server._ROUTE_WORKFLOWS.clear()
+        server._RESULT_DOWNLOADS.clear()
 
     def tearDown(self) -> None:
         server._ROUTE_WORKFLOWS.clear()
+        server._RESULT_DOWNLOADS.clear()
         self.temp_dir.cleanup()
         self.env_patcher.stop()
 
@@ -54,6 +56,7 @@ class RouteBehaviorTests(unittest.TestCase):
         *,
         pdf_path: str | None = None,
         page_range_decision: str = "all_pages",
+        page_range_confirmed: bool | None = True,
         page_start: int | None = None,
         page_end: int | None = None,
     ) -> dict[str, object]:
@@ -61,6 +64,7 @@ class RouteBehaviorTests(unittest.TestCase):
             route_workflow_id=workflow_id,
             pdf_path=pdf_path or str(self.demo_pdf),
             page_range_decision=page_range_decision,
+            page_range_confirmed=page_range_confirmed,
             page_start=page_start,
             page_end=page_end,
         )
@@ -170,7 +174,9 @@ class RouteBehaviorTests(unittest.TestCase):
         steps = result["workflow_guidance"]["steps"]
         self.assertEqual(steps[0]["field"], "route_confirmed")
         self.assertEqual(steps[1]["tool"], "ppt_set_conversion_target")
-        self.assertEqual(steps[5]["tool"], "ppt_set_route_options")
+        self.assertEqual(steps[5]["field"], "page_range_confirmed")
+        self.assertEqual(steps[5]["tool"], "ppt_set_conversion_target")
+        self.assertEqual(steps[6]["tool"], "ppt_set_route_options")
 
     def test_set_conversion_target_requires_workflow_id(self) -> None:
         result = server.ppt_set_conversion_target(route_workflow_id="")
@@ -204,6 +210,7 @@ class RouteBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result["current_decisions"]["pdf_path"], str(self.demo_pdf.resolve()))
         self.assertEqual(result["current_decisions"]["page_range_decision"], "all_pages")
+        self.assertEqual(result["current_decisions"]["page_range_confirmed"], True)
         self.assertEqual(result["current_decisions"]["page_range_label"], "all_pages")
         self.assertEqual(result["next_tool"], "ppt_set_route_options")
 
@@ -219,10 +226,27 @@ class RouteBehaviorTests(unittest.TestCase):
         )
 
         self.assertEqual(result["current_decisions"]["page_range_decision"], "page_range")
+        self.assertEqual(result["current_decisions"]["page_range_confirmed"], True)
         self.assertEqual(result["current_decisions"]["page_start"], 4)
         self.assertEqual(result["current_decisions"]["page_end"], 6)
         self.assertEqual(result["current_decisions"]["page_range_label"], "4-6")
         self.assertEqual(result["route_workflow"]["conversion_target"]["page_range_label"], "4-6")
+
+    def test_set_conversion_target_requires_explicit_page_range_confirmation(self) -> None:
+        workflow_id = self._lock_workflow()
+
+        result = server.ppt_set_conversion_target(
+            route_workflow_id=workflow_id,
+            pdf_path=str(self.demo_pdf),
+            page_range_decision="all_pages",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["ready_for_submit"])
+        self.assertEqual(result["missing_fields"], ["page_range_confirmed", "scanned_page_mode", "remove_footer_notebooklm", "ocr_ai_model_decision"])
+        self.assertEqual(result["next_field"], "page_range_confirmed")
+        self.assertEqual(result["next_tool"], "ppt_set_conversion_target")
+        self.assertEqual(result["current_decisions"]["page_range_confirmed"], None)
 
     def test_set_conversion_target_requires_page_bounds_for_page_range(self) -> None:
         workflow_id = self._lock_workflow()
@@ -238,6 +262,23 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertEqual(result["missing_fields"], ["page_start", "page_end", "scanned_page_mode", "remove_footer_notebooklm", "ocr_ai_model_decision"])
         self.assertEqual(result["next_field"], "page_start")
         self.assertEqual(result["next_tool"], "ppt_set_conversion_target")
+
+    def test_set_conversion_target_resets_confirmation_when_page_scope_changes(self) -> None:
+        workflow_id = self._lock_workflow()
+        self._set_target(workflow_id)
+
+        result = server.ppt_set_conversion_target(
+            route_workflow_id=workflow_id,
+            page_range_decision="page_range",
+            page_start=4,
+            page_end=6,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["current_decisions"]["page_range_decision"], "page_range")
+        self.assertEqual(result["current_decisions"]["page_range_confirmed"], None)
+        self.assertEqual(result["missing_fields"], ["page_range_confirmed", "scanned_page_mode", "remove_footer_notebooklm", "ocr_ai_model_decision"])
+        self.assertEqual(result["next_field"], "page_range_confirmed")
 
     def test_set_conversion_target_rejects_all_pages_with_explicit_bounds(self) -> None:
         workflow_id = self._lock_workflow()
@@ -273,6 +314,27 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "workflow_step_out_of_order")
         self.assertEqual(result["error"]["details"]["next_tool"], "ppt_set_conversion_target")
         self.assertEqual(result["error"]["details"]["blocking_fields"], ["pdf_path", "page_range_decision"])
+
+    def test_set_route_options_blocks_until_page_scope_is_confirmed(self) -> None:
+        workflow_id = self._lock_workflow()
+        server.ppt_set_conversion_target(
+            route_workflow_id=workflow_id,
+            pdf_path=str(self.demo_pdf),
+            page_range_decision="all_pages",
+        )
+
+        result = server.ppt_set_route_options(
+            route_workflow_id=workflow_id,
+            scanned_page_mode="fullpage",
+            remove_footer_notebooklm=False,
+            ocr_ai_model_decision="route_default",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "workflow_step_out_of_order")
+        self.assertEqual(result["error"]["details"]["next_tool"], "ppt_set_conversion_target")
+        self.assertEqual(result["error"]["details"]["blocking_fields"], ["page_range_confirmed"])
+        self.assertEqual(result["error"]["details"]["next_field"], "page_range_confirmed")
 
     def test_set_route_options_rejects_ai_override_for_non_ai_route(self) -> None:
         workflow_id = self._lock_workflow(route="基础本地解析")
@@ -407,6 +469,24 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertEqual(result["error"]["details"]["missing_fields"], ["scanned_page_mode", "remove_footer_notebooklm", "ocr_ai_model_decision"])
         self.assertEqual(result["error"]["details"]["next_tool"], "ppt_set_route_options")
 
+    def test_convert_pdf_requires_confirmed_page_scope_before_options(self) -> None:
+        workflow_id = self._lock_workflow()
+        server.ppt_set_conversion_target(
+            route_workflow_id=workflow_id,
+            pdf_path=str(self.demo_pdf),
+            page_range_decision="all_pages",
+        )
+
+        result = server.ppt_convert_pdf(route_workflow_id=workflow_id)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "missing_required_decision")
+        self.assertEqual(
+            result["error"]["details"]["missing_fields"],
+            ["page_range_confirmed", "scanned_page_mode", "remove_footer_notebooklm", "ocr_ai_model_decision"],
+        )
+        self.assertEqual(result["error"]["details"]["next_tool"], "ppt_set_conversion_target")
+
     def test_convert_pdf_submit_only_uses_stored_route_default_state(self) -> None:
         workflow_id = self._lock_workflow()
         self._set_target(workflow_id, page_range_decision="page_range", page_start=4, page_end=6)
@@ -456,6 +536,7 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertIn("ppt_set_conversion_target", prompt)
         self.assertIn("ppt_set_route_options", prompt)
         self.assertIn("page_range_decision", prompt)
+        self.assertIn("page_range_confirmed", prompt)
         self.assertIn("不要静默默认成整份 PDF", prompt)
         self.assertIn("ocr_ai_model_choice_index", prompt)
         self.assertIn("route_workflow_id", prompt)
@@ -471,6 +552,7 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertIn("route_workflow_id", set_target_params)
         self.assertIn("pdf_path", set_target_params)
         self.assertIn("page_range_decision", set_target_params)
+        self.assertIn("page_range_confirmed", set_target_params)
         self.assertIn("page_start", set_target_params)
         self.assertIn("page_end", set_target_params)
         self.assertIn("route_workflow_id", set_options_params)

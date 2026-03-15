@@ -29,7 +29,7 @@ mcp = FastMCP(
         "Before starting a conversion, ask for missing inputs one by one in this order: "
         "1) route/chain, and do not infer, recommend, or choose the route on the user's behalf, "
         "2) explicitly confirm that route with `route_confirmed=true` by calling `ppt_check_route`, which returns a locked `route_workflow_id`, "
-        "3) call `ppt_set_conversion_target` on that same `route_workflow_id` to write `pdf_path` and `page_range_decision`, and if needed `page_start`/`page_end`, "
+        "3) call `ppt_set_conversion_target` on that same `route_workflow_id` to write `pdf_path`, `page_range_decision`, and after the user explicitly confirms the page scope set `page_range_confirmed=true`; include `page_start`/`page_end` when `page_range_decision=page_range`, "
         "4) call `ppt_set_route_options` on that same `route_workflow_id` to write scanned-page handling, footer removal, and AI model choice, "
         "5) continue the same high-level flow only with that `route_workflow_id`; do not start mixing other routes into the same flow, "
         "6) for AI OCR routes only, call `ppt_list_route_models` with the same `route_workflow_id`, then ask whether to keep the route default model or use a fetched model explicitly. "
@@ -40,6 +40,8 @@ mcp = FastMCP(
         "If the user explicitly wants to switch gateways, stop the guided flow and use low-level expert tools instead. "
         "When the user asks for available models, never answer from memory: call `ppt_list_route_models` (preferred) or `ppt_list_ai_models`, "
         "then repeat only the exact returned model IDs. Do not invent provider buckets, categories, or recommendations that the tool did not return. "
+        "A completed job is not the same as a locally saved file. "
+        "Do not claim a PPTX was saved to disk unless `ppt_download_result` was actually called and returned `saved_to`. "
         "If an earlier step is still missing, do not skip ahead to later tools. "
         "Never say you will choose the best route for the user. If the user only asks to convert a page range, first show the available routes and ask the user to pick one. "
         "Do not silently choose `segmented`, and prefer `ppt_convert_pdf` over `ppt_create_job` for normal use. "
@@ -64,6 +66,7 @@ class RouteWorkflowState:
     updated_at: float
     pdf_path: str | None = None
     page_range_decision: Literal["all_pages", "page_range"] | None = None
+    page_range_confirmed: bool | None = None
     page_start: int | None = None
     page_end: int | None = None
     scanned_page_mode: Literal["fullpage", "segmented"] | None = None
@@ -77,14 +80,53 @@ class RouteWorkflowState:
 
 
 _ROUTE_WORKFLOWS: dict[str, RouteWorkflowState] = {}
+_RESULT_DOWNLOADS: dict[str, dict[str, Any]] = {}
 
 
 def _route_confirmation_value(route_confirmed: bool | None) -> bool:
     return route_confirmed is True
 
 
+def _page_range_confirmation_value(page_range_confirmed: bool | None) -> bool:
+    return page_range_confirmed is True
+
+
 def _low_level_override_value(low_level_override_confirmed: bool | None) -> bool:
     return low_level_override_confirmed is True
+
+
+def _build_result_download_state(
+    *,
+    job_id: str | None,
+    job_status: str | None = None,
+) -> dict[str, Any]:
+    normalized_job_id = str(job_id or "").strip()
+    record = _RESULT_DOWNLOADS.get(normalized_job_id) if normalized_job_id else None
+    normalized_status = str(job_status or "").strip().lower()
+    return {
+        "job_id": normalized_job_id or None,
+        "job_completed": normalized_status == "completed",
+        "result_ready_for_download": normalized_status == "completed",
+        "result_downloaded_via_mcp": bool(record),
+        "saved_to": record.get("saved_to") if record else None,
+        "downloaded_at_unix": record.get("downloaded_at_unix") if record else None,
+        "requires_explicit_download_tool": True,
+        "download_tool": "ppt_download_result",
+        "do_not_claim_local_save_before_download": True,
+        "agent_reply_policy": (
+            "Do not claim the PPTX was saved locally unless ppt_download_result "
+            "was actually called and returned saved_to."
+        ),
+    }
+
+
+def _record_result_download(*, job_id: str, saved_to: str) -> dict[str, Any]:
+    record = {
+        "saved_to": str(saved_to),
+        "downloaded_at_unix": int(time.time()),
+    }
+    _RESULT_DOWNLOADS[str(job_id).strip()] = record
+    return record
 
 
 def _normalize_ai_model_decision(
@@ -508,6 +550,7 @@ def _update_route_workflow(
     state: RouteWorkflowState,
     pdf_path: str | None = None,
     page_range_decision: Literal["all_pages", "page_range"] | None = None,
+    page_range_confirmed: bool | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
     scanned_page_mode: Literal["fullpage", "segmented"] | None = None,
@@ -516,17 +559,21 @@ def _update_route_workflow(
     ocr_ai_model_choice_index: int | None = None,
     ocr_ai_model: str | None = None,
 ) -> None:
+    page_target_changed = False
     if pdf_path is not None:
         state.pdf_path = _resolve_existing_local_pdf_path(pdf_path)
     if page_range_decision is not None:
         state.page_range_decision = page_range_decision
+        page_target_changed = True
         if page_range_decision == "all_pages":
             state.page_start = None
             state.page_end = None
     if page_start is not None:
         state.page_start = _normalize_page_value("page_start", page_start)
+        page_target_changed = True
     if page_end is not None:
         state.page_end = _normalize_page_value("page_end", page_end)
+        page_target_changed = True
     if state.page_range_decision == "all_pages" and (
         state.page_start is not None or state.page_end is not None
     ):
@@ -543,6 +590,38 @@ def _update_route_workflow(
             },
         )
     _validate_page_range(page_start=state.page_start, page_end=state.page_end)
+    page_target_complete = state.page_range_decision == "all_pages" or (
+        state.page_range_decision == "page_range"
+        and state.page_start is not None
+        and state.page_end is not None
+    )
+    if page_range_confirmed is not None:
+        if not page_target_complete:
+            raise RouteConfigError(
+                code="invalid_page_range_confirmation",
+                message=(
+                    "page_range_confirmed can only be set after the page scope is "
+                    "fully specified"
+                ),
+                details={
+                    "page_range_decision": state.page_range_decision,
+                    "page_start": state.page_start,
+                    "page_end": state.page_end,
+                    "next_field": (
+                        "page_range_decision"
+                        if state.page_range_decision is None
+                        else (
+                            "page_start"
+                            if state.page_start is None
+                            else "page_end"
+                        )
+                    ),
+                    "next_tool": "ppt_set_conversion_target",
+                },
+            )
+        state.page_range_confirmed = bool(page_range_confirmed)
+    elif page_target_changed:
+        state.page_range_confirmed = None
     if scanned_page_mode is not None:
         state.scanned_page_mode = scanned_page_mode
     if remove_footer_notebooklm is not None:
@@ -628,6 +707,7 @@ def _build_route_workflow_payload(state: RouteWorkflowState) -> dict[str, Any]:
         route_confirmed=True,
         pdf_path=state.pdf_path,
         page_range_decision=state.page_range_decision,
+        page_range_confirmed=state.page_range_confirmed,
         page_start=state.page_start,
         page_end=state.page_end,
         ai_route=state.ai_route,
@@ -658,6 +738,7 @@ def _build_route_workflow_payload(state: RouteWorkflowState) -> dict[str, Any]:
         "conversion_target": {
             "pdf_path": state.pdf_path,
             "page_range_decision": state.page_range_decision,
+            "page_range_confirmed": state.page_range_confirmed,
             "page_start": state.page_start,
             "page_end": state.page_end,
             "page_range_label": _page_range_label(
@@ -687,6 +768,7 @@ def _build_current_decisions(state: RouteWorkflowState) -> dict[str, Any]:
         "route_confirmed": True,
         "pdf_path": state.pdf_path,
         "page_range_decision": state.page_range_decision,
+        "page_range_confirmed": state.page_range_confirmed,
         "page_start": state.page_start,
         "page_end": state.page_end,
         "page_range_label": _page_range_label(
@@ -706,6 +788,7 @@ def _missing_conversion_target_decisions(
     *,
     pdf_path: str | None,
     page_range_decision: Literal["all_pages", "page_range"] | None,
+    page_range_confirmed: bool | None,
     page_start: int | None,
     page_end: int | None,
 ) -> list[str]:
@@ -719,6 +802,10 @@ def _missing_conversion_target_decisions(
             missing.append("page_start")
         if page_end is None:
             missing.append("page_end")
+    if page_range_decision is not None and not missing and not _page_range_confirmation_value(
+        page_range_confirmed
+    ):
+        missing.append("page_range_confirmed")
     return missing
 
 
@@ -730,6 +817,7 @@ def _require_conversion_target_step(
     blocking_fields = _missing_conversion_target_decisions(
         pdf_path=state.pdf_path,
         page_range_decision=state.page_range_decision,
+        page_range_confirmed=state.page_range_confirmed,
         page_start=state.page_start,
         page_end=state.page_end,
     )
@@ -741,6 +829,7 @@ def _require_conversion_target_step(
         route_confirmed=True,
         pdf_path=state.pdf_path,
         page_range_decision=state.page_range_decision,
+        page_range_confirmed=state.page_range_confirmed,
         page_start=state.page_start,
         page_end=state.page_end,
         ai_route=state.ai_route,
@@ -868,7 +957,7 @@ def _build_workflow_guidance(
                 "不要根据 PDF 内容、版式或主观判断推断路线。",
                 "不要说“我来为你选择最适合的路线”。",
                 "不要编造 `pdf_path`；只能使用用户明确提供的真实本地 PDF 路径。",
-                "`page_range_decision` 必须显式确认；不要静默默认成 `all_pages`。",
+                "`page_range_decision` 必须由用户明确选择，并且要用 `page_range_confirmed=true` 显式锁定；不要静默默认成 `all_pages`。",
                 "一旦 `ppt_check_route` 返回 `route_workflow_id`，后续高层 route 工具必须沿用同一个 workflow，不要把不同路线串起来。",
                 "高层 route 流程里不要再向用户索要 API key；路线凭据默认由 MCP 环境变量复用。",
                 "高层 route 工具不支持切换 provider / base_url；如需切网关，停止引导流程并改用低层工具。",
@@ -897,7 +986,6 @@ def _build_workflow_guidance(
             {
                 "field": "page_range_decision",
                 "question": "再明确确认要转换哪些页：`all_pages`（整份 PDF）还是 `page_range`（指定页码范围）。这一步必须明确，不要跳过，也不要静默默认成整份。",
-                "recommended": "all_pages",
                 "tool": "ppt_set_conversion_target",
             },
             {
@@ -910,6 +998,12 @@ def _build_workflow_guidance(
                 "field": "page_end",
                 "question": "如果刚才选择了 `page_range`，再填写 `page_end`。",
                 "when": "page_range_decision=page_range",
+                "tool": "ppt_set_conversion_target",
+            },
+            {
+                "field": "page_range_confirmed",
+                "question": "等用户把页数范围明确说清后，再用 `page_range_confirmed=true` 把这次页数选择锁定；在这一步之前，不要继续到扫描页处理、页脚或模型选择。",
+                "when": "page_range_decision is explicit and complete",
                 "tool": "ppt_set_conversion_target",
             },
             {
@@ -962,7 +1056,7 @@ def _build_workflow_guidance(
             "不要根据 PDF 内容、版式或主观判断推断路线。",
             "不要说“我来为你选择最适合的路线”。",
             "不要编造 `pdf_path`；只能使用用户明确提供的真实本地 PDF 路径。",
-            "`page_range_decision` 必须显式确认；不要静默默认成 `all_pages`。",
+            "`page_range_decision` 必须由用户明确选择，并且要用 `page_range_confirmed=true` 显式锁定；不要静默默认成 `all_pages`。",
             "一旦 `ppt_check_route` 返回 `route_workflow_id`，后续高层 route 工具必须沿用同一个 workflow，不要把不同路线串起来。",
             "高层 route 流程里不要再向用户索要 API key；路线凭据默认由 MCP 环境变量复用。",
             "高层 route 工具不支持切换 provider / base_url；如需切网关，停止引导流程并改用低层工具。",
@@ -1078,6 +1172,7 @@ def _missing_submit_decisions(
     route_confirmed: bool | None,
     pdf_path: str | None,
     page_range_decision: Literal["all_pages", "page_range"] | None,
+    page_range_confirmed: bool | None,
     page_start: int | None,
     page_end: int | None,
     ai_route: bool,
@@ -1094,6 +1189,7 @@ def _missing_submit_decisions(
         _missing_conversion_target_decisions(
             pdf_path=pdf_path,
             page_range_decision=page_range_decision,
+            page_range_confirmed=page_range_confirmed,
             page_start=page_start,
             page_end=page_end,
         )
@@ -1119,6 +1215,7 @@ def _build_decision_status(
     route_confirmed: bool | None = None,
     pdf_path: str | None = None,
     page_range_decision: Literal["all_pages", "page_range"] | None = None,
+    page_range_confirmed: bool | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
     ai_route: bool,
@@ -1136,6 +1233,7 @@ def _build_decision_status(
         route_confirmed=route_confirmed,
         pdf_path=pdf_path,
         page_range_decision=page_range_decision,
+        page_range_confirmed=page_range_confirmed,
         page_start=page_start,
         page_end=page_end,
         ai_route=ai_route,
@@ -1210,6 +1308,7 @@ def _require_submit_decisions(
     route_confirmed: bool | None = None,
     pdf_path: str | None = None,
     page_range_decision: Literal["all_pages", "page_range"] | None = None,
+    page_range_confirmed: bool | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
     ai_route: bool,
@@ -1224,6 +1323,7 @@ def _require_submit_decisions(
         route_confirmed=route_confirmed,
         pdf_path=pdf_path,
         page_range_decision=page_range_decision,
+        page_range_confirmed=page_range_confirmed,
         page_start=page_start,
         page_end=page_end,
         ai_route=ai_route,
@@ -1379,6 +1479,7 @@ def ppt_check_route(
                     route_confirmed=route_confirmed,
                     pdf_path=None,
                     page_range_decision=None,
+                    page_range_confirmed=None,
                     page_start=None,
                     page_end=None,
                     ai_route=_route_uses_ai_ocr(route_definition.route),
@@ -1397,6 +1498,7 @@ def ppt_check_route(
             route_confirmed=True,
             pdf_path=state.pdf_path,
             page_range_decision=state.page_range_decision,
+            page_range_confirmed=state.page_range_confirmed,
             page_start=state.page_start,
             page_end=state.page_end,
             ai_route=state.ai_route,
@@ -1447,6 +1549,7 @@ def ppt_set_conversion_target(
     route_workflow_id: str,
     pdf_path: str | None = None,
     page_range_decision: Literal["all_pages", "page_range"] | None = None,
+    page_range_confirmed: bool | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
 ) -> dict[str, Any]:
@@ -1455,7 +1558,9 @@ def ppt_set_conversion_target(
     This is step 2 of the high-level guided flow. Use it to persist conversion
     target state so weaker models do not have to remember page ranges from chat
     history. `pdf_path` must be a real local PDF path explicitly provided by
-    the user.
+    the user. Do not treat the page scope as complete until
+    `page_range_confirmed=true` is explicitly written for the currently selected
+    pages.
     """
     try:
         normalized_page_range_decision = _normalize_page_range_decision(
@@ -1466,6 +1571,7 @@ def ppt_set_conversion_target(
             state=state,
             pdf_path=pdf_path,
             page_range_decision=normalized_page_range_decision,
+            page_range_confirmed=page_range_confirmed,
             page_start=page_start,
             page_end=page_end,
         )
@@ -1476,6 +1582,7 @@ def ppt_set_conversion_target(
             route_confirmed=True,
             pdf_path=state.pdf_path,
             page_range_decision=state.page_range_decision,
+            page_range_confirmed=state.page_range_confirmed,
             page_start=state.page_start,
             page_end=state.page_end,
             ai_route=state.ai_route,
@@ -1537,6 +1644,7 @@ def ppt_set_route_options(
             route_confirmed=True,
             pdf_path=state.pdf_path,
             page_range_decision=state.page_range_decision,
+            page_range_confirmed=state.page_range_confirmed,
             page_start=state.page_start,
             page_end=state.page_end,
             ai_route=state.ai_route,
@@ -1575,6 +1683,7 @@ def ppt_convert_pdf(
             route_confirmed=True,
             pdf_path=state.pdf_path,
             page_range_decision=state.page_range_decision,
+            page_range_confirmed=state.page_range_confirmed,
             page_start=state.page_start,
             page_end=state.page_end,
             ai_route=state.ai_route,
@@ -1645,10 +1754,10 @@ def ppt_conversion_intake(route: str | None = None) -> str:
     lines = [
         "请按下面顺序逐个确认，不要一次性抛出所有参数。",
         "不要自己替用户选路线，也不要说“我来为你选择最适合的路线”。",
-        "高层 route 流程先用 `ppt_check_route` 锁定路线，再用 `ppt_set_conversion_target` 写 `pdf_path` 和页码范围，再用 `ppt_set_route_options` 写扫描页处理、页脚和模型选择，最后才用 `ppt_convert_pdf` 提交。",
+        "高层 route 流程先用 `ppt_check_route` 锁定路线，再用 `ppt_set_conversion_target` 写 `pdf_path`、页码范围，并在页数范围明确后写 `page_range_confirmed=true`，再用 `ppt_set_route_options` 写扫描页处理、页脚和模型选择，最后才用 `ppt_convert_pdf` 提交。",
         "拿到 `route_workflow_id` 后，后续继续沿用这个 workflow；不要把不同路线串到同一条流程里。",
-        "如果用户一开始就给了 `pdf_path` 或页码范围，尽早在 `ppt_set_conversion_target` 里写进同一个 `route_workflow_id`，其中页码范围要明确写成 `page_range_decision`，不要只靠聊天记忆记住“第几页到第几页”。",
-        "`page_range_decision` 必须显式确认；不要静默默认成整份 PDF。",
+        "如果用户一开始就给了 `pdf_path` 或页码范围，尽早在 `ppt_set_conversion_target` 里写进同一个 `route_workflow_id`，其中页码范围要明确写成 `page_range_decision`，并在范围完整后写 `page_range_confirmed=true`，不要只靠聊天记忆记住“第几页到第几页”。",
+        "`page_range_decision` 必须由用户明确选择，并且要用 `page_range_confirmed=true` 显式锁定；不要静默默认成整份 PDF。",
         "`pdf_path` 只能使用用户明确提供的真实本地 PDF 路径；不要编造示例路径、测试路径或占位路径。",
         "高层 route 流程里，路线凭据默认从 MCP 环境变量复用；不要在用户选了路线或模型后再反问 API key。",
         "高层 route 工具不支持切换 provider / base_url；如需切网关，改用低层专家工具。",
