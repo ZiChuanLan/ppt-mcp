@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import inspect
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,14 +35,20 @@ class RouteBehaviorTests(unittest.TestCase):
         )
         self.env_patcher.start()
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_settings = server.settings
+        server.settings = replace(
+            server.settings,
+            route_workflow_store_dir=Path(self.temp_dir.name) / "route-workflows",
+        )
         self.demo_pdf = Path(self.temp_dir.name) / "demo.pdf"
         self.demo_pdf.write_bytes(b"%PDF-1.4\n%stub\n")
-        server._ROUTE_WORKFLOWS.clear()
+        server._clear_route_workflow_store()
         server._RESULT_DOWNLOADS.clear()
 
     def tearDown(self) -> None:
-        server._ROUTE_WORKFLOWS.clear()
+        server._clear_route_workflow_store()
         server._RESULT_DOWNLOADS.clear()
+        server.settings = self.original_settings
         self.temp_dir.cleanup()
         self.env_patcher.stop()
 
@@ -374,6 +382,51 @@ class RouteBehaviorTests(unittest.TestCase):
         self.assertTrue(result["ready_for_submit"])
         self.assertEqual(result["missing_fields"], [])
         self.assertEqual(result["current_decisions"]["ocr_ai_model_decision"], "route_default")
+
+    def test_set_route_options_recovers_workflow_after_memory_reset(self) -> None:
+        workflow_id = self._lock_workflow()
+        self._set_target(workflow_id)
+
+        server._ROUTE_WORKFLOWS.clear()
+
+        result = self._set_options(workflow_id)
+
+        self.assertTrue(result["ready_for_submit"])
+        self.assertEqual(result["route_workflow_id"], workflow_id)
+        self.assertEqual(result["current_decisions"]["pdf_path"], str(self.demo_pdf.resolve()))
+
+    def test_explicit_model_selection_survives_memory_reset_after_listing(self) -> None:
+        workflow_id = self._lock_workflow()
+        self._set_target(workflow_id)
+        self._list_models(workflow_id, models=["deepseek-ai/DeepSeek-OCR", "olmOCR"])
+
+        server._ROUTE_WORKFLOWS.clear()
+
+        result = self._set_options(
+            workflow_id,
+            ocr_ai_model_decision="explicit",
+            ocr_ai_model_choice_index=1,
+        )
+
+        self.assertTrue(result["ready_for_submit"])
+        self.assertEqual(result["effective_config"]["ocr_ai_model"], "olmOCR")
+        self.assertEqual(result["current_decisions"]["ocr_ai_model_choice_index"], 1)
+
+    def test_expired_persisted_workflow_is_rejected_after_memory_reset(self) -> None:
+        workflow_id = self._lock_workflow()
+        state = server._ROUTE_WORKFLOWS[workflow_id]
+        state.updated_at = time.time() - server._route_workflow_ttl_seconds() - 5
+        server._persist_route_workflow(state)
+
+        server._ROUTE_WORKFLOWS.clear()
+
+        result = server.ppt_set_conversion_target(route_workflow_id=workflow_id)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "unknown_route_workflow")
+        self.assertFalse(
+            (server.settings.route_workflow_store_dir / f"{workflow_id}.json").exists()
+        )
 
     def test_list_route_models_uses_route_credentials_and_returns_choice_lines(self) -> None:
         workflow_id = self._lock_workflow()

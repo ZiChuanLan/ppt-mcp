@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import json
+from pathlib import Path
+import threading
 import time
 from typing import Any, Literal
 from uuid import uuid4
@@ -49,10 +52,6 @@ mcp = FastMCP(
     ),
 )
 
-
-_ROUTE_WORKFLOW_TTL_SECONDS = 60 * 60
-
-
 @dataclass
 class RouteWorkflowState:
     workflow_id: str
@@ -78,9 +77,44 @@ class RouteWorkflowState:
     last_listed_models: list[str] = field(default_factory=list)
     last_model_listing_capability: str | None = None
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RouteWorkflowState":
+        return cls(
+            workflow_id=str(payload["workflow_id"]),
+            route=str(payload["route"]),
+            title=str(payload["title"]),
+            summary=str(payload.get("summary") or ""),
+            options=dict(payload.get("options") or {}),
+            effective_config=dict(payload.get("effective_config") or {}),
+            ai_route=bool(payload.get("ai_route")),
+            created_at=float(payload["created_at"]),
+            updated_at=float(payload["updated_at"]),
+            pdf_path=str(payload["pdf_path"]) if payload.get("pdf_path") else None,
+            page_range_decision=payload.get("page_range_decision"),
+            page_range_confirmed=payload.get("page_range_confirmed"),
+            page_start=payload.get("page_start"),
+            page_end=payload.get("page_end"),
+            scanned_page_mode=payload.get("scanned_page_mode"),
+            remove_footer_notebooklm=payload.get("remove_footer_notebooklm"),
+            ocr_ai_model_decision=payload.get("ocr_ai_model_decision"),
+            ocr_ai_model_choice_index=payload.get("ocr_ai_model_choice_index"),
+            ocr_ai_model=str(payload["ocr_ai_model"])
+            if payload.get("ocr_ai_model")
+            else None,
+            last_model_choices=list(payload.get("last_model_choices") or []),
+            last_listed_models=[
+                str(item) for item in (payload.get("last_listed_models") or [])
+            ],
+            last_model_listing_capability=payload.get("last_model_listing_capability"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 _ROUTE_WORKFLOWS: dict[str, RouteWorkflowState] = {}
 _RESULT_DOWNLOADS: dict[str, dict[str, Any]] = {}
+_ROUTE_WORKFLOW_LOCK = threading.RLock()
 
 
 def _route_confirmation_value(route_confirmed: bool | None) -> bool:
@@ -93,6 +127,58 @@ def _page_range_confirmation_value(page_range_confirmed: bool | None) -> bool:
 
 def _low_level_override_value(low_level_override_confirmed: bool | None) -> bool:
     return low_level_override_confirmed is True
+
+
+def _route_workflow_ttl_seconds() -> int:
+    return max(60, int(getattr(settings, "route_workflow_ttl_seconds", 3600) or 3600))
+
+
+def _route_workflow_store_dir() -> Path:
+    store_dir = settings.route_workflow_store_dir
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return store_dir
+
+
+def _route_workflow_path(workflow_id: str) -> Path:
+    return _route_workflow_store_dir() / f"{str(workflow_id).strip()}.json"
+
+
+def _persist_route_workflow(state: RouteWorkflowState) -> None:
+    path = _route_workflow_path(state.workflow_id)
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(state.to_dict(), ensure_ascii=True, indent=2))
+    tmp_path.replace(path)
+
+
+def _delete_persisted_route_workflow(workflow_id: str) -> None:
+    with suppress(FileNotFoundError):
+        _route_workflow_path(workflow_id).unlink()
+
+
+def _load_persisted_route_workflow(route_workflow_id: str) -> RouteWorkflowState | None:
+    path = _route_workflow_path(route_workflow_id)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+        state = RouteWorkflowState.from_dict(payload)
+    except Exception:
+        _delete_persisted_route_workflow(route_workflow_id)
+        return None
+    if state.workflow_id != str(route_workflow_id).strip():
+        _delete_persisted_route_workflow(route_workflow_id)
+        return None
+    return state
+
+
+def _clear_route_workflow_store() -> None:
+    _ROUTE_WORKFLOWS.clear()
+    store_dir = settings.route_workflow_store_dir
+    if not store_dir.exists():
+        return
+    for path in store_dir.glob("*.json"):
+        with suppress(FileNotFoundError):
+            path.unlink()
 
 
 def _build_result_download_state(
@@ -470,14 +556,30 @@ def _page_range_label(
 
 
 def _prune_route_workflows() -> None:
-    cutoff = time.time() - _ROUTE_WORKFLOW_TTL_SECONDS
-    expired = [
-        workflow_id
-        for workflow_id, state in _ROUTE_WORKFLOWS.items()
-        if state.updated_at < cutoff
-    ]
-    for workflow_id in expired:
-        _ROUTE_WORKFLOWS.pop(workflow_id, None)
+    cutoff = time.time() - _route_workflow_ttl_seconds()
+    with _ROUTE_WORKFLOW_LOCK:
+        expired = [
+            workflow_id
+            for workflow_id, state in _ROUTE_WORKFLOWS.items()
+            if state.updated_at < cutoff
+        ]
+        for workflow_id in expired:
+            _ROUTE_WORKFLOWS.pop(workflow_id, None)
+
+        store_dir = settings.route_workflow_store_dir
+        if not store_dir.exists():
+            return
+        for path in store_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text())
+                updated_at = float(payload.get("updated_at") or 0.0)
+            except Exception:
+                with suppress(FileNotFoundError):
+                    path.unlink()
+                continue
+            if updated_at < cutoff:
+                with suppress(FileNotFoundError):
+                    path.unlink()
 
 
 def _route_workflow_required_details() -> dict[str, Any]:
@@ -514,7 +616,9 @@ def _create_route_workflow(*, resolved_route: Any) -> RouteWorkflowState:
         created_at=now,
         updated_at=now,
     )
-    _ROUTE_WORKFLOWS[state.workflow_id] = state
+    with _ROUTE_WORKFLOW_LOCK:
+        _ROUTE_WORKFLOWS[state.workflow_id] = state
+        _persist_route_workflow(state)
     return state
 
 
@@ -529,7 +633,12 @@ def _get_route_workflow(route_workflow_id: str | None) -> RouteWorkflowState:
             details=_route_workflow_required_details(),
         )
     _prune_route_workflows()
-    state = _ROUTE_WORKFLOWS.get(cleaned)
+    with _ROUTE_WORKFLOW_LOCK:
+        state = _ROUTE_WORKFLOWS.get(cleaned)
+        if state is None:
+            state = _load_persisted_route_workflow(cleaned)
+            if state is not None:
+                _ROUTE_WORKFLOWS[cleaned] = state
     if state is None:
         raise RouteConfigError(
             code="unknown_route_workflow",
@@ -559,108 +668,114 @@ def _update_route_workflow(
     ocr_ai_model_choice_index: int | None = None,
     ocr_ai_model: str | None = None,
 ) -> None:
-    page_target_changed = False
-    if pdf_path is not None:
-        state.pdf_path = _resolve_existing_local_pdf_path(pdf_path)
-    if page_range_decision is not None:
-        state.page_range_decision = page_range_decision
-        page_target_changed = True
-        if page_range_decision == "all_pages":
-            state.page_start = None
-            state.page_end = None
-    if page_start is not None:
-        state.page_start = _normalize_page_value("page_start", page_start)
-        page_target_changed = True
-    if page_end is not None:
-        state.page_end = _normalize_page_value("page_end", page_end)
-        page_target_changed = True
-    if state.page_range_decision == "all_pages" and (
-        state.page_start is not None or state.page_end is not None
-    ):
-        raise RouteConfigError(
-            code="invalid_page_range_decision",
-            message=(
-                "page_range_decision=all_pages cannot be combined with explicit "
-                "page_start/page_end"
-            ),
-            details={
-                "page_range_decision": state.page_range_decision,
-                "page_start": state.page_start,
-                "page_end": state.page_end,
-            },
-        )
-    _validate_page_range(page_start=state.page_start, page_end=state.page_end)
-    page_target_complete = state.page_range_decision == "all_pages" or (
-        state.page_range_decision == "page_range"
-        and state.page_start is not None
-        and state.page_end is not None
-    )
-    if page_range_confirmed is not None:
-        if not page_target_complete:
+    with _ROUTE_WORKFLOW_LOCK:
+        page_target_changed = False
+        if pdf_path is not None:
+            state.pdf_path = _resolve_existing_local_pdf_path(pdf_path)
+        if page_range_decision is not None:
+            state.page_range_decision = page_range_decision
+            page_target_changed = True
+            if page_range_decision == "all_pages":
+                state.page_start = None
+                state.page_end = None
+        if page_start is not None:
+            state.page_start = _normalize_page_value("page_start", page_start)
+            page_target_changed = True
+        if page_end is not None:
+            state.page_end = _normalize_page_value("page_end", page_end)
+            page_target_changed = True
+        if state.page_range_decision == "all_pages" and (
+            state.page_start is not None or state.page_end is not None
+        ):
             raise RouteConfigError(
-                code="invalid_page_range_confirmation",
+                code="invalid_page_range_decision",
                 message=(
-                    "page_range_confirmed can only be set after the page scope is "
-                    "fully specified"
+                    "page_range_decision=all_pages cannot be combined with explicit "
+                    "page_start/page_end"
                 ),
                 details={
                     "page_range_decision": state.page_range_decision,
                     "page_start": state.page_start,
                     "page_end": state.page_end,
-                    "next_field": (
-                        "page_range_decision"
-                        if state.page_range_decision is None
-                        else (
-                            "page_start"
-                            if state.page_start is None
-                            else "page_end"
-                        )
-                    ),
-                    "next_tool": "ppt_set_conversion_target",
                 },
             )
-        state.page_range_confirmed = bool(page_range_confirmed)
-    elif page_target_changed:
-        state.page_range_confirmed = None
-    if scanned_page_mode is not None:
-        state.scanned_page_mode = scanned_page_mode
-    if remove_footer_notebooklm is not None:
-        state.remove_footer_notebooklm = bool(remove_footer_notebooklm)
-    if ocr_ai_model_decision is not None:
-        state.ocr_ai_model_decision = ocr_ai_model_decision
-        if ocr_ai_model_decision == "route_default":
-            state.ocr_ai_model = None
-            state.ocr_ai_model_choice_index = None
-    if ocr_ai_model is not None:
-        state.ocr_ai_model = str(ocr_ai_model).strip() or None
-    if ocr_ai_model_choice_index is not None:
-        choice = _resolve_model_choice_from_index(
-            state=state,
-            choice_index=ocr_ai_model_choice_index,
+        _validate_page_range(page_start=state.page_start, page_end=state.page_end)
+        page_target_complete = state.page_range_decision == "all_pages" or (
+            state.page_range_decision == "page_range"
+            and state.page_start is not None
+            and state.page_end is not None
         )
-        selected_model = str(choice["model"]).strip()
-        if state.ocr_ai_model and state.ocr_ai_model != selected_model:
-            raise RouteConfigError(
-                code="model_choice_conflict",
-                message=(
-                    "ocr_ai_model_choice_index and ocr_ai_model refer to different "
-                    "models"
-                ),
-                details={
-                    "ocr_ai_model_choice_index": ocr_ai_model_choice_index,
-                    "ocr_ai_model": state.ocr_ai_model,
-                    "choice_model": selected_model,
-                },
+        if page_range_confirmed is not None:
+            if not page_target_complete:
+                raise RouteConfigError(
+                    code="invalid_page_range_confirmation",
+                    message=(
+                        "page_range_confirmed can only be set after the page scope is "
+                        "fully specified"
+                    ),
+                    details={
+                        "page_range_decision": state.page_range_decision,
+                        "page_start": state.page_start,
+                        "page_end": state.page_end,
+                        "next_field": (
+                            "page_range_decision"
+                            if state.page_range_decision is None
+                            else (
+                                "page_start"
+                                if state.page_start is None
+                                else "page_end"
+                            )
+                        ),
+                        "next_tool": "ppt_set_conversion_target",
+                    },
+                )
+            state.page_range_confirmed = bool(page_range_confirmed)
+        elif page_target_changed:
+            state.page_range_confirmed = None
+        if scanned_page_mode is not None:
+            state.scanned_page_mode = scanned_page_mode
+        if remove_footer_notebooklm is not None:
+            state.remove_footer_notebooklm = bool(remove_footer_notebooklm)
+        if ocr_ai_model_decision is not None:
+            state.ocr_ai_model_decision = ocr_ai_model_decision
+            if ocr_ai_model_decision == "route_default":
+                state.ocr_ai_model = None
+                state.ocr_ai_model_choice_index = None
+        if ocr_ai_model is not None:
+            state.ocr_ai_model = str(ocr_ai_model).strip() or None
+        if ocr_ai_model_choice_index is not None:
+            choice = _resolve_model_choice_from_index(
+                state=state,
+                choice_index=ocr_ai_model_choice_index,
             )
-        state.ocr_ai_model_choice_index = ocr_ai_model_choice_index
-        state.ocr_ai_model = selected_model
-    _validate_explicit_model_selection(state)
-    if state.ai_route and state.ocr_ai_model_decision == "explicit" and state.ocr_ai_model:
-        for item in state.last_model_choices:
-            if str(item["model"]) == state.ocr_ai_model:
-                state.ocr_ai_model_choice_index = int(item["index"])
-                break
-    state.updated_at = time.time()
+            selected_model = str(choice["model"]).strip()
+            if state.ocr_ai_model and state.ocr_ai_model != selected_model:
+                raise RouteConfigError(
+                    code="model_choice_conflict",
+                    message=(
+                        "ocr_ai_model_choice_index and ocr_ai_model refer to different "
+                        "models"
+                    ),
+                    details={
+                        "ocr_ai_model_choice_index": ocr_ai_model_choice_index,
+                        "ocr_ai_model": state.ocr_ai_model,
+                        "choice_model": selected_model,
+                    },
+                )
+            state.ocr_ai_model_choice_index = ocr_ai_model_choice_index
+            state.ocr_ai_model = selected_model
+        _validate_explicit_model_selection(state)
+        if (
+            state.ai_route
+            and state.ocr_ai_model_decision == "explicit"
+            and state.ocr_ai_model
+        ):
+            for item in state.last_model_choices:
+                if str(item["model"]) == state.ocr_ai_model:
+                    state.ocr_ai_model_choice_index = int(item["index"])
+                    break
+        state.updated_at = time.time()
+        _persist_route_workflow(state)
 
 
 def _preview_route_workflow(
@@ -1970,10 +2085,12 @@ def ppt_list_route_models(
             route_default_model=route_default_model,
             fetched_models=models,
         )
-        state.last_listed_models = list(models)
-        state.last_model_choices = list(model_choices)
-        state.last_model_listing_capability = resolved_capability
-        state.updated_at = time.time()
+        with _ROUTE_WORKFLOW_LOCK:
+            state.last_listed_models = list(models)
+            state.last_model_choices = list(model_choices)
+            state.last_model_listing_capability = resolved_capability
+            state.updated_at = time.time()
+            _persist_route_workflow(state)
         choice_display_lines = _build_choice_display_lines(model_choices)
         return {
             "ok": True,

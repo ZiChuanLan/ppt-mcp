@@ -111,6 +111,15 @@ PPT_API_BASE_URL=http://127.0.0.1:8000
 PPT_API_TIMEOUT_SECONDS=120
 ```
 
+高层 route workflow 默认还会写本地状态到：
+
+```bash
+var/route-workflows
+```
+
+这让 `ppt_check_route -> ppt_set_conversion_target -> ppt_list_route_models -> ppt_set_route_options -> ppt_convert_pdf`
+这一串高层工具在 MCP 宿主进程重启后，仍可以继续沿用同一个 `route_workflow_id`。默认 TTL 是 `3600` 秒，超过后仍会要求从 `ppt_check_route` 重新开始。
+
 如果主服务开启了：
 
 ```bash
@@ -161,6 +170,31 @@ PPT_API_BASE_URL=http://127.0.0.1:3000
 - `PPT_API_BEARER_TOKEN` 是 `ppt-mcp` 请求 API 时带上的密码
 
 通常这两个值应保持一致。
+
+### 高层 route workflow 本地持久化
+
+当前高层 route workflow 不再只保存在进程内存。
+
+- 每次 `ppt_check_route` 创建 workflow 后，会把状态写到本地目录
+- 后续 `ppt_set_conversion_target`、`ppt_list_route_models`、`ppt_set_route_options` 更新后也会同步写回
+- 如果 MCP 宿主只是重启进程，但仍在同一台机器、同一份存储目录上运行，原来的 `route_workflow_id` 仍可恢复
+- 如果 workflow 超过 TTL，或者持久化文件损坏 / 被删除，仍会返回“请从 `ppt_check_route` 重新开始”
+
+相关环境变量：
+
+- `PPT_MCP_ROUTE_WORKFLOW_STORE_DIR`
+  默认值是仓库内的 `var/route-workflows`
+- `PPT_MCP_ROUTE_WORKFLOW_TTL_SECONDS`
+  默认值是 `3600`
+
+示例：
+
+```bash
+PPT_MCP_ROUTE_WORKFLOW_STORE_DIR=/home/lan/workspace/ppt-mcp/var/route-workflows
+PPT_MCP_ROUTE_WORKFLOW_TTL_SECONDS=3600
+```
+
+这两个变量只影响高层 route workflow 的本地恢复，不影响远程 `ppt-mcp-remote` 的上传源缓存目录 `PPT_MCP_DATA_DIR`。
 
 ## 当前工具能力
 
