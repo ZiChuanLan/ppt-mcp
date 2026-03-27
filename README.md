@@ -254,7 +254,25 @@ PPT_MCP_ROUTE_WORKFLOW_TTL_SECONDS=3600
   }
 }
 ```
-
+远程：
+```json
+{
+  "ppt": {
+    "type": "stdio",
+    "command": "uvx",
+    "args": [
+      "--from",
+      "git+https://github.com/ZiChuanLan/ppt-mcp",
+      "ppt-mcp"
+    ],
+    "env": {
+      "PPT_API_BASE_URL": "https://ppt.015201314.xyz",
+      "MINERU_API_TOKEN": "yourkey",
+      "SILICONFLOW_API_KEY": "sk-yourkey"
+    }
+  }
+}
+```
 ## License
 
 MIT.
